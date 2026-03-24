@@ -13,6 +13,15 @@ class Config:
     POLYMARKET_FUNDER_ADDRESS: str = os.getenv("POLYMARKET_FUNDER_ADDRESS", "")
     POLYMARKET_SIGNATURE_TYPE: int = int(os.getenv("POLYMARKET_SIGNATURE_TYPE", "0"))
 
+    # CLOB API Credentials
+    POLYMARKET_API_KEY: str = os.getenv("POLYMARKET_API_KEY", "")
+    POLYMARKET_API_SECRET: str = os.getenv("POLYMARKET_API_SECRET", "")
+    POLYMARKET_API_PASSPHRASE: str = os.getenv("POLYMARKET_API_PASSPHRASE", "")
+
+    # Additional APIs
+    GAMMA_API_URL: str = os.getenv("GAMMA_API_URL", "https://gamma-api.polymarket.com")
+    DATA_API_URL: str = os.getenv("DATA_API_URL", "https://data-api.polymarket.com")
+
     # Risk Controls
     MAX_POSITION_SIZE_USD: float = float(os.getenv("MAX_POSITION_SIZE_USD", "100"))
     DAILY_LOSS_LIMIT_USD: float = float(os.getenv("DAILY_LOSS_LIMIT_USD", "50"))
