@@ -15,7 +15,7 @@ class PolymarketClient:
     """Simplified interface to Polymarket CLOB API via direct HTTP calls."""
 
     def __init__(self):
-        self._http = httpx.Client(base_url=BASE_URL, timeout=15)
+        self._http = httpx.Client(base_url=BASE_URL, timeout=15, proxy=None)
 
     # ---- Read-only endpoints ----
 
