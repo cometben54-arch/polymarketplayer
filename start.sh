@@ -25,6 +25,10 @@ fi
 # Activate virtual environment
 source venv/bin/activate
 
+# Upgrade pip first
+echo "升级 pip..."
+pip install --upgrade pip -q
+
 # Install dependencies
 echo "安装依赖..."
 pip install -r requirements.txt -q
