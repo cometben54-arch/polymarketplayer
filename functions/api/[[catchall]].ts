@@ -26,17 +26,25 @@ const CLOB = (e: Env) => (e.POLYMARKET_API_URL || 'https://clob.polymarket.com')
 const GAMMA = (e: Env) => (e.GAMMA_API_URL || 'https://gamma-api.polymarket.com').replace(/\/$/, '');
 
 async function hmacSign(secret: string, msg: string): Promise<string> {
-  const kd = Uint8Array.from(atob(secret.replace(/-/g, '+').replace(/_/g, '/')), c => c.charCodeAt(0));
+  // Base64 decode the secret (standard base64)
+  const raw = atob(secret);
+  const kd = Uint8Array.from(raw, c => c.charCodeAt(0));
   const key = await crypto.subtle.importKey('raw', kd, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
   const sig = await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(msg));
-  return btoa(String.fromCharCode(...new Uint8Array(sig))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  // Return standard base64 (not URL-safe)
+  return btoa(String.fromCharCode(...new Uint8Array(sig)));
 }
 
-async function authHeaders(env: Env, method: string, path: string): Promise<Record<string, string>> {
+async function authHeaders(env: Env, method: string, path: string, body = ''): Promise<Record<string, string>> {
   if (!env.POLYMARKET_API_KEY || !env.POLYMARKET_API_SECRET) return {};
   const ts = Math.floor(Date.now() / 1000).toString();
-  const sig = await hmacSign(env.POLYMARKET_API_SECRET, ts + method.toUpperCase() + path);
-  return { 'POLY_HMAC_KEY': env.POLYMARKET_API_KEY, 'POLY_HMAC_SIGNATURE': sig, 'POLY_HMAC_TIMESTAMP': ts, 'POLY_HMAC_PASSPHRASE': env.POLYMARKET_API_PASSPHRASE || '' };
+  const sig = await hmacSign(env.POLYMARKET_API_SECRET, ts + method.toUpperCase() + path + body);
+  return {
+    'POLY_API_KEY': env.POLYMARKET_API_KEY,
+    'POLY_SIGNATURE': sig,
+    'POLY_TIMESTAMP': ts,
+    'POLY_PASSPHRASE': env.POLYMARKET_API_PASSPHRASE || '',
+  };
 }
 
 async function clobGet(env: Env, path: string): Promise<any> {
@@ -197,20 +205,47 @@ app.put('/settings', async c => {
   return c.json({ status: 'saved' });
 });
 
+// Debug: check which env vars are available
+app.get('/debug/env', async c => {
+  const keys = ['POLYMARKET_API_KEY', 'POLYMARKET_API_SECRET', 'POLYMARKET_API_PASSPHRASE', 'POLYMARKET_PRIVATE_KEY', 'POLYMARKET_FUNDER_ADDRESS', 'POLYMARKET_API_URL', 'GAMMA_API_URL', 'DATA_API_URL'];
+  const status: Record<string, any> = {};
+  for (const k of keys) {
+    const v = (c.env as any)[k];
+    status[k] = { exists: v !== undefined && v !== null && v !== '', type: typeof v, length: v ? String(v).length : 0 };
+  }
+  status['DB_BOUND'] = { exists: !!c.env.DB };
+  return c.json(status);
+});
+
 // Connection test
 app.get('/connection/test', async c => {
-  const result = { api_configured: false, clob_reachable: false, auth_ok: false, message: '' };
-  if (!c.env.POLYMARKET_API_KEY) { result.message = 'API Key 未配置 (在 Pages 设置中添加环境变量)'; return c.json(result); }
+  const result: any = { api_configured: false, clob_reachable: false, auth_ok: false, message: '' };
+
+  // Check env vars first
+  const apiKey = c.env.POLYMARKET_API_KEY;
+  const apiSecret = c.env.POLYMARKET_API_SECRET;
+  const passphrase = c.env.POLYMARKET_API_PASSPHRASE;
+
+  if (!apiKey) { result.message = 'POLYMARKET_API_KEY 未配置 (在 Cloudflare Pages > Settings > Environment variables 添加)'; return c.json(result); }
+  if (!apiSecret) { result.message = 'POLYMARKET_API_SECRET 未配置'; return c.json(result); }
+  if (!passphrase) { result.message = 'POLYMARKET_API_PASSPHRASE 未配置'; return c.json(result); }
   result.api_configured = true;
+
+  // Test CLOB public endpoint
   try {
-    const d: any = await clobGet(c.env, '/markets');
-    if (d?.data) result.clob_reachable = true; else { result.message = 'CLOB API 不可达'; return c.json(result); }
+    const res = await fetch(`${CLOB(c.env)}/markets`);
+    if (res.ok) { result.clob_reachable = true; }
+    else { result.message = 'CLOB API 返回 HTTP ' + res.status; return c.json(result); }
   } catch (e: any) { result.message = 'CLOB 连接失败: ' + e.message; return c.json(result); }
+
+  // Test L2 authenticated endpoint
   try {
-    const h = await authHeaders(c.env, 'GET', '/auth/api-keys');
-    const res = await fetch(`${CLOB(c.env)}/auth/api-keys`, { headers: h });
+    const path = '/auth/api-keys';
+    const h = await authHeaders(c.env, 'GET', path);
+    const res = await fetch(`${CLOB(c.env)}${path}`, { headers: h });
+    const body = await res.text();
     if (res.ok) { result.auth_ok = true; result.message = '连接成功！API 认证通过'; }
-    else result.message = 'API 认证失败 (HTTP ' + res.status + ')';
+    else { result.message = 'API 认证失败 (HTTP ' + res.status + '): ' + body.slice(0, 200); }
   } catch (e: any) { result.message = '认证失败: ' + e.message; }
   return c.json(result);
 });
