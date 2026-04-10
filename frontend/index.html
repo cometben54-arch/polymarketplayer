@@ -10,10 +10,13 @@
 
 <!-- Header -->
 <div class="header">
-    <h1><span>◆</span> Polymarket 套利机器人</h1>
+    <h1><span>&#9670;</span> Polymarket 套利机器人</h1>
     <div class="header-controls">
         <span class="ws-dot ws-disconnected" id="wsDot"></span>
         <span id="wsStatus" style="font-size:12px;color:#94a3b8">未连接</span>
+        <span id="apiDot" style="width:8px;height:8px;border-radius:50%;display:inline-block;background:#ef4444;margin-left:12px"></span>
+        <span id="apiStatus" style="font-size:12px;color:#94a3b8">API 未连接</span>
+        <button class="btn btn-ghost btn-sm" onclick="openModal('settings')" style="margin-left:8px;font-size:18px" title="设置">&#9881;</button>
         <span class="status-badge status-stopped" id="botStatus">已停止</span>
         <button class="btn btn-success" id="btnStart" onclick="botControl('start')">启动</button>
         <button class="btn btn-warning" id="btnPause" onclick="botControl('pause')" style="display:none">暂停</button>
@@ -22,654 +25,135 @@
     </div>
 </div>
 
-<!-- Dashboard -->
 <div class="dashboard">
-
-    <!-- Stats Row -->
     <div class="full-width stats-row">
-        <div class="stat-card">
-            <div class="stat-value" id="statDailyPnl">$0.00</div>
-            <div class="stat-label">今日盈亏</div>
-        </div>
-        <div class="stat-card">
-            <div class="stat-value" id="statTotalPnl">$0.00</div>
-            <div class="stat-label">总盈亏</div>
-        </div>
-        <div class="stat-card">
-            <div class="stat-value" id="statMarkets">0</div>
-            <div class="stat-label">监控市场</div>
-        </div>
-        <div class="stat-card">
-            <div class="stat-value" id="statOpps">0</div>
-            <div class="stat-label">发现机会</div>
-        </div>
+        <div class="stat-card"><div class="stat-value" id="statDailyPnl">$0.00</div><div class="stat-label">今日盈亏</div></div>
+        <div class="stat-card"><div class="stat-value" id="statTotalPnl">$0.00</div><div class="stat-label">总盈亏</div></div>
+        <div class="stat-card"><div class="stat-value" id="statMarkets">0</div><div class="stat-label">监控市场</div></div>
+        <div class="stat-card"><div class="stat-value" id="statOpps">0</div><div class="stat-label">发现机会</div></div>
     </div>
-
-    <!-- Watched Markets -->
-    <div class="card">
-        <div class="card-header">
-            <h2>监控市场</h2>
-            <button class="btn btn-primary btn-sm" onclick="openModal('addMarket')">+ 添加市场</button>
-        </div>
-        <div class="card-body">
-            <div class="table-wrap">
-                <table>
-                    <thead>
-                        <tr><th>问题</th><th>YES 价格</th><th>NO 价格</th><th>价差</th><th>操作</th></tr>
-                    </thead>
-                    <tbody id="marketsTable"></tbody>
-                </table>
-            </div>
-            <div id="noMarkets" style="text-align:center;padding:20px;color:#94a3b8">
-                暂无监控市场，点击上方添加
-            </div>
-        </div>
-    </div>
-
-    <!-- Arbitrage Opportunities -->
-    <div class="card">
-        <div class="card-header">
-            <h2>套利机会</h2>
-            <span id="lastScan" style="font-size:12px;color:#94a3b8">等待扫描...</span>
-        </div>
-        <div class="card-body" id="oppsList">
-            <div style="text-align:center;padding:20px;color:#94a3b8">
-                启动机器人后将自动扫描套利机会
-            </div>
-        </div>
-    </div>
-
-    <!-- Arbitrage Groups -->
-    <div class="card">
-        <div class="card-header">
-            <h2>套利分组</h2>
-            <button class="btn btn-primary btn-sm" onclick="openModal('addGroup')">+ 创建分组</button>
-        </div>
-        <div class="card-body">
-            <div class="table-wrap">
-                <table>
-                    <thead>
-                        <tr><th>名称</th><th>策略</th><th>市场数</th><th>操作</th></tr>
-                    </thead>
-                    <tbody id="groupsTable"></tbody>
-                </table>
-            </div>
-            <div id="noGroups" style="text-align:center;padding:20px;color:#94a3b8">
-                暂无分组，可将相关市场组合在一起寻找跨市场套利
-            </div>
-        </div>
-    </div>
-
-    <!-- Risk Settings -->
-    <div class="card">
-        <div class="card-header">
-            <h2>风险控制</h2>
-            <button class="btn btn-ghost btn-sm" onclick="saveRisk()">保存设置</button>
-        </div>
-        <div class="card-body">
-            <div class="form-row">
-                <div class="form-group">
-                    <label>最大持仓 (USD)</label>
-                    <input type="number" class="form-control" id="riskMaxPosition" value="100">
-                </div>
-                <div class="form-group">
-                    <label>日亏损限额 (USD)</label>
-                    <input type="number" class="form-control" id="riskDailyLoss" value="50">
-                </div>
-            </div>
-            <div class="form-row">
-                <div class="form-group">
-                    <label>单笔交易上限 (USD)</label>
-                    <input type="number" class="form-control" id="riskMaxTrade" value="20">
-                </div>
-                <div class="form-group">
-                    <label>最小套利价差</label>
-                    <input type="number" class="form-control" id="riskMinSpread" value="0.02" step="0.005">
-                </div>
-            </div>
-        </div>
-    </div>
-
-    <!-- Alerts -->
-    <div class="card">
-        <div class="card-header">
-            <h2>警报</h2>
-            <span id="alertCount" style="font-size:12px;color:#94a3b8">0 条未解决</span>
-        </div>
-        <div class="card-body" id="alertsList" style="max-height:300px;overflow-y:auto">
-            <div style="text-align:center;padding:20px;color:#94a3b8">暂无警报</div>
-        </div>
-    </div>
-
-    <!-- Trade History -->
-    <div class="card">
-        <div class="card-header">
-            <h2>交易记录</h2>
-        </div>
-        <div class="card-body">
-            <div class="table-wrap">
-                <table>
-                    <thead>
-                        <tr><th>时间</th><th>方向</th><th>价格</th><th>数量</th><th>金额</th><th>状态</th></tr>
-                    </thead>
-                    <tbody id="tradesTable"></tbody>
-                </table>
-            </div>
-            <div id="noTrades" style="text-align:center;padding:20px;color:#94a3b8">暂无交易记录</div>
-        </div>
-    </div>
-
-    <!-- Live Log -->
-    <div class="card full-width">
-        <div class="card-header">
-            <h2>实时日志</h2>
-            <button class="btn btn-ghost btn-sm" onclick="clearLog()">清空</button>
-        </div>
-        <div class="card-body">
-            <div class="log-feed" id="logFeed"></div>
-        </div>
-    </div>
+    <div class="card"><div class="card-header"><h2>监控市场</h2><button class="btn btn-primary btn-sm" onclick="openModal('addMarket')">+ 添加市场</button></div><div class="card-body"><div class="table-wrap"><table><thead><tr><th>问题</th><th>YES</th><th>NO</th><th>价差</th><th>操作</th></tr></thead><tbody id="marketsTable"></tbody></table></div><div id="noMarkets" style="text-align:center;padding:20px;color:#94a3b8">暂无监控市场</div></div></div>
+    <div class="card"><div class="card-header"><h2>套利机会</h2><span id="lastScan" style="font-size:12px;color:#94a3b8">等待扫描...</span></div><div class="card-body" id="oppsList"><div style="text-align:center;padding:20px;color:#94a3b8">启动机器人后将自动扫描</div></div></div>
+    <div class="card"><div class="card-header"><h2>套利分组</h2><button class="btn btn-primary btn-sm" onclick="openModal('addGroup')">+ 创建分组</button></div><div class="card-body"><div class="table-wrap"><table><thead><tr><th>名称</th><th>策略</th><th>市场数</th><th>操作</th></tr></thead><tbody id="groupsTable"></tbody></table></div><div id="noGroups" style="text-align:center;padding:20px;color:#94a3b8">暂无分组</div></div></div>
+    <div class="card"><div class="card-header"><h2>风险控制</h2><button class="btn btn-ghost btn-sm" onclick="saveRisk()">保存设置</button></div><div class="card-body"><div class="form-row"><div class="form-group"><label>最大持仓 (USD)</label><input type="number" class="form-control" id="riskMaxPosition" value="100"></div><div class="form-group"><label>日亏损限额 (USD)</label><input type="number" class="form-control" id="riskDailyLoss" value="50"></div></div><div class="form-row"><div class="form-group"><label>单笔交易上限 (USD)</label><input type="number" class="form-control" id="riskMaxTrade" value="20"></div><div class="form-group"><label>最小套利价差</label><input type="number" class="form-control" id="riskMinSpread" value="0.02" step="0.005"></div></div></div></div>
+    <div class="card"><div class="card-header"><h2>警报</h2><span id="alertCount" style="font-size:12px;color:#94a3b8">0 条未解决</span></div><div class="card-body" id="alertsList" style="max-height:300px;overflow-y:auto"><div style="text-align:center;padding:20px;color:#94a3b8">暂无警报</div></div></div>
+    <div class="card"><div class="card-header"><h2>交易记录</h2></div><div class="card-body"><div class="table-wrap"><table><thead><tr><th>时间</th><th>方向</th><th>价格</th><th>数量</th><th>金额</th><th>状态</th></tr></thead><tbody id="tradesTable"></tbody></table></div><div id="noTrades" style="text-align:center;padding:20px;color:#94a3b8">暂无交易记录</div></div></div>
+    <div class="card full-width"><div class="card-header"><h2>实时日志</h2><button class="btn btn-ghost btn-sm" onclick="clearLog()">清空</button></div><div class="card-body"><div class="log-feed" id="logFeed"></div></div></div>
 </div>
 
 <!-- Add Market Modal -->
-<div class="modal-backdrop" id="modalAddMarket">
-    <div class="modal">
-        <h3>添加监控市场</h3>
-        <div class="form-group">
-            <label>搜索 Polymarket 市场</label>
-            <input type="text" class="form-control" id="marketSearch" placeholder="输入关键词搜索..." oninput="searchMarkets()">
-        </div>
-        <div id="searchResults" style="max-height:200px;overflow-y:auto;margin-bottom:14px"></div>
-        <hr style="border-color:#334155;margin:14px 0">
-        <h4 style="font-size:14px;margin-bottom:10px">或手动输入</h4>
-        <div class="form-group">
-            <label>Condition ID</label>
-            <input type="text" class="form-control" id="marketConditionId" placeholder="0x...">
-        </div>
-        <div class="form-group">
-            <label>市场问题描述</label>
-            <input type="text" class="form-control" id="marketQuestion" placeholder="Will X happen?">
-        </div>
-        <div class="form-row">
-            <div class="form-group">
-                <label>YES Token ID</label>
-                <input type="text" class="form-control" id="marketTokenYes" placeholder="可选">
-            </div>
-            <div class="form-group">
-                <label>NO Token ID</label>
-                <input type="text" class="form-control" id="marketTokenNo" placeholder="可选">
-            </div>
-        </div>
-        <div style="display:flex;gap:8px;justify-content:flex-end">
-            <button class="btn btn-ghost" onclick="closeModal('addMarket')">取消</button>
-            <button class="btn btn-primary" onclick="addMarket()">添加</button>
-        </div>
-    </div>
-</div>
+<div class="modal-backdrop" id="modalAddMarket"><div class="modal">
+    <h3>添加监控市场</h3>
+    <div class="form-group"><label>搜索市场</label><input type="text" class="form-control" id="marketSearch" placeholder="输入关键词..." oninput="searchMarkets()"></div>
+    <div id="searchResults" style="max-height:200px;overflow-y:auto;margin-bottom:14px"></div>
+    <hr style="border-color:#334155;margin:14px 0"><h4 style="font-size:14px;margin-bottom:10px">或手动输入</h4>
+    <div class="form-group"><label>Condition ID</label><input type="text" class="form-control" id="marketConditionId" placeholder="0x..."></div>
+    <div class="form-group"><label>问题</label><input type="text" class="form-control" id="marketQuestion" placeholder="Will X happen?"></div>
+    <div class="form-row"><div class="form-group"><label>YES Token</label><input type="text" class="form-control" id="marketTokenYes"></div><div class="form-group"><label>NO Token</label><input type="text" class="form-control" id="marketTokenNo"></div></div>
+    <div style="display:flex;gap:8px;justify-content:flex-end"><button class="btn btn-ghost" onclick="closeModal('addMarket')">取消</button><button class="btn btn-primary" onclick="addMarket()">添加</button></div>
+</div></div>
 
 <!-- Add Group Modal -->
-<div class="modal-backdrop" id="modalAddGroup">
-    <div class="modal">
-        <h3>创建套利分组</h3>
-        <div class="form-group">
-            <label>分组名称</label>
-            <input type="text" class="form-control" id="groupName" placeholder="例: 美国大选结果">
-        </div>
-        <div class="form-group">
-            <label>描述</label>
-            <input type="text" class="form-control" id="groupDesc" placeholder="可选描述">
-        </div>
-        <div class="form-group">
-            <label>策略</label>
-            <select class="form-control" id="groupStrategy">
-                <option value="complement">互补 (YES+NO=1)</option>
-                <option value="multi_outcome">多结果 (多市场概率和=1)</option>
-                <option value="correlation">相关性 (跨市场关联)</option>
-            </select>
-        </div>
-        <div class="form-group">
-            <label>包含的市场 (选择已添加的监控市场)</label>
-            <div id="groupMarketsList" style="max-height:150px;overflow-y:auto"></div>
-        </div>
-        <div style="display:flex;gap:8px;justify-content:flex-end">
-            <button class="btn btn-ghost" onclick="closeModal('addGroup')">取消</button>
-            <button class="btn btn-primary" onclick="addGroup()">创建</button>
-        </div>
+<div class="modal-backdrop" id="modalAddGroup"><div class="modal">
+    <h3>创建套利分组</h3>
+    <div class="form-group"><label>名称</label><input type="text" class="form-control" id="groupName"></div>
+    <div class="form-group"><label>描述</label><input type="text" class="form-control" id="groupDesc"></div>
+    <div class="form-group"><label>策略</label><select class="form-control" id="groupStrategy"><option value="complement">互补</option><option value="multi_outcome">多结果</option><option value="correlation">相关性</option></select></div>
+    <div class="form-group"><label>市场</label><div id="groupMarketsList" style="max-height:150px;overflow-y:auto"></div></div>
+    <div style="display:flex;gap:8px;justify-content:flex-end"><button class="btn btn-ghost" onclick="closeModal('addGroup')">取消</button><button class="btn btn-primary" onclick="addGroup()">创建</button></div>
+</div></div>
+
+<!-- Settings Modal -->
+<div class="modal-backdrop" id="modalSettings"><div class="modal" style="max-width:640px;max-height:85vh;overflow-y:auto">
+    <h3>&#9881; 系统设置</h3>
+    <div style="background:#1e293b;border-radius:8px;padding:14px;margin-bottom:16px">
+        <h4 style="font-size:14px;margin-bottom:10px;color:#60a5fa">CLOB API 凭证</h4>
+        <div class="form-group"><label>API Key</label><input type="password" class="form-control setting-input" data-key="POLYMARKET_API_KEY"></div>
+        <div class="form-group"><label>API Secret</label><input type="password" class="form-control setting-input" data-key="POLYMARKET_API_SECRET"></div>
+        <div class="form-group"><label>Passphrase</label><input type="password" class="form-control setting-input" data-key="POLYMARKET_API_PASSPHRASE"></div>
     </div>
-</div>
+    <div style="background:#1e293b;border-radius:8px;padding:14px;margin-bottom:16px">
+        <h4 style="font-size:14px;margin-bottom:10px;color:#60a5fa">钱包</h4>
+        <div class="form-group"><label>Private Key</label><input type="password" class="form-control setting-input" data-key="POLYMARKET_PRIVATE_KEY"></div>
+        <div class="form-group"><label>钱包地址</label><input type="text" class="form-control setting-input" data-key="POLYMARKET_FUNDER_ADDRESS"></div>
+        <div class="form-group"><label>签名类型</label><select class="form-control setting-input" data-key="POLYMARKET_SIGNATURE_TYPE"><option value="0">0-EOA</option><option value="1">1-Email</option><option value="2">2-合约</option></select></div>
+    </div>
+    <div id="settingsMsg" style="text-align:center;padding:8px;margin-bottom:10px;border-radius:6px;display:none"></div>
+    <div style="display:flex;gap:8px;justify-content:space-between">
+        <button class="btn btn-primary" onclick="testConnection()" id="btnTestConn">测试连接</button>
+        <div style="display:flex;gap:8px"><button class="btn btn-ghost" onclick="closeModal('settings')">取消</button><button class="btn btn-success" onclick="saveSettings()">保存</button></div>
+    </div>
+</div></div>
 
 <script>
-// ============================================================
-// State
-// ============================================================
-let ws = null;
-let botState = { running: false, paused: false };
-let markets = [];
-let searchTimeout = null;
+let ws = null, botState = { running: false, paused: false }, markets = [], searchTimeout = null;
 
-// ============================================================
-// API helpers
-// ============================================================
 async function api(path, method = 'GET', body = null) {
     const opts = { method, headers: { 'Content-Type': 'application/json' } };
     if (body) opts.body = JSON.stringify(body);
-    const res = await fetch('/api' + path, opts);
-    return res.json();
+    return (await fetch('/api' + path, opts)).json();
 }
 
-// ============================================================
-// WebSocket
-// ============================================================
 function connectWS() {
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-    ws = new WebSocket(`${proto}://${location.host}/ws`);
-
-    ws.onopen = () => {
-        document.getElementById('wsDot').className = 'ws-dot ws-connected';
-        document.getElementById('wsStatus').textContent = '已连接';
-        addLog('系统连接成功', 'info');
-    };
-
-    ws.onclose = () => {
-        document.getElementById('wsDot').className = 'ws-dot ws-disconnected';
-        document.getElementById('wsStatus').textContent = '已断开';
-        setTimeout(connectWS, 3000);
-    };
-
-    ws.onmessage = (evt) => {
-        const msg = JSON.parse(evt.data);
-        handleWSMessage(msg);
-    };
+    ws = new WebSocket(proto + '://' + location.host + '/ws');
+    ws.onopen = () => { document.getElementById('wsDot').className='ws-dot ws-connected'; document.getElementById('wsStatus').textContent='已连接'; addLog('连接成功','info'); };
+    ws.onclose = () => { document.getElementById('wsDot').className='ws-dot ws-disconnected'; document.getElementById('wsStatus').textContent='已断开'; setTimeout(connectWS,3000); };
+    ws.onmessage = (e) => handleWSMessage(JSON.parse(e.data));
 }
-
 function handleWSMessage(msg) {
-    switch (msg.event) {
-        case 'state':
-            updateBotState(msg.data);
-            break;
-        case 'scan_complete':
-            document.getElementById('lastScan').textContent = '上次扫描: ' + new Date().toLocaleTimeString();
-            document.getElementById('statOpps').textContent = msg.data.opportunities_found;
-            renderOpportunities(msg.data.opportunities);
-            addLog(`扫描完成: ${msg.data.markets_scanned} 市场, ${msg.data.opportunities_found} 机会`, 'info');
-            break;
-        case 'trade_executed':
-            addLog(`交易执行: ${msg.data.success ? '成功' : '失败'} - ${JSON.stringify(msg.data.opportunity || {})}`,
-                   msg.data.success ? 'trade' : 'error');
-            loadTrades();
-            loadStatus();
-            break;
-        case 'error':
-            addLog(`错误: ${msg.data.message}`, 'error');
-            break;
+    switch(msg.event) {
+        case 'state': updateBotState(msg.data); break;
+        case 'scan_complete': document.getElementById('lastScan').textContent='扫描: '+new Date().toLocaleTimeString(); document.getElementById('statOpps').textContent=msg.data.opportunities_found; renderOpportunities(msg.data.opportunities); addLog('扫描: '+msg.data.markets_scanned+'市场, '+msg.data.opportunities_found+'机会','info'); break;
+        case 'trade_executed': addLog('交易: '+(msg.data.success?'成功':'失败'), msg.data.success?'trade':'error'); loadTrades(); loadStatus(); break;
+        case 'error': addLog('错误: '+msg.data.message,'error'); break;
     }
 }
-
-// ============================================================
-// Bot Control
-// ============================================================
-async function botControl(action) {
-    await api('/bot/control', 'POST', { action });
-    await loadStatus();
+async function botControl(a) { await api('/bot/control','POST',{action:a}); await loadStatus(); }
+function updateBotState(s) {
+    if(s.running!==undefined)botState.running=s.running; if(s.paused!==undefined)botState.paused=s.paused;
+    if(s.daily_pnl!==undefined)updatePnl('statDailyPnl',s.daily_pnl); if(s.total_pnl!==undefined)updatePnl('statTotalPnl',s.total_pnl);
+    const b=document.getElementById('botStatus'),s1=document.getElementById('btnStart'),s2=document.getElementById('btnPause'),s3=document.getElementById('btnResume'),s4=document.getElementById('btnStop');
+    if(!botState.running){b.textContent='已停止';b.className='status-badge status-stopped';s1.style.display='';s2.style.display='none';s3.style.display='none';s4.style.display='none';}
+    else if(botState.paused){b.textContent='已暂停';b.className='status-badge status-paused';s1.style.display='none';s2.style.display='none';s3.style.display='';s4.style.display='';}
+    else{b.textContent='运行中';b.className='status-badge status-running';s1.style.display='none';s2.style.display='';s3.style.display='none';s4.style.display='';}
 }
+function updatePnl(id,v){const e=document.getElementById(id);e.textContent='$'+v.toFixed(2);e.className='stat-value '+(v>=0?'stat-positive':'stat-negative');}
 
-function updateBotState(state) {
-    if (state.running !== undefined) botState.running = state.running;
-    if (state.paused !== undefined) botState.paused = state.paused;
-    if (state.daily_pnl !== undefined) updatePnl('statDailyPnl', state.daily_pnl);
-    if (state.total_pnl !== undefined) updatePnl('statTotalPnl', state.total_pnl);
+async function loadMarkets(){markets=await api('/markets');const t=document.getElementById('marketsTable'),e=document.getElementById('noMarkets');if(!markets.length){t.innerHTML='';e.style.display='';document.getElementById('statMarkets').textContent='0';return;}e.style.display='none';document.getElementById('statMarkets').textContent=markets.length;t.innerHTML=markets.map(m=>'<tr><td title="'+m.condition_id+'">'+m.question+'</td><td>-</td><td>-</td><td>-</td><td><button class="btn btn-danger btn-sm" onclick="removeMarket(\''+m.condition_id+'\')">删除</button></td></tr>').join('');}
+async function searchMarkets(){clearTimeout(searchTimeout);const q=document.getElementById('marketSearch').value;if(q.length<2)return;searchTimeout=setTimeout(async()=>{const r=await api('/markets/search?q='+encodeURIComponent(q));const c=document.getElementById('searchResults');if(Array.isArray(r)&&r.length)c.innerHTML=r.map(m=>'<div style="padding:8px;border-bottom:1px solid #334155;cursor:pointer;font-size:13px" onclick="selectSR(\''+((m.condition_id||''))+"','"+((m.question||'').replace(/'/g,"\\'"))+"','"+(m.tokens?.[0]?.token_id||'')+"','"+(m.tokens?.[1]?.token_id||'')+"')\">"+((m.question||'Unknown'))+'</div>').join('');else c.innerHTML='<div style="padding:8px;color:#94a3b8">未找到</div>';},500);}
+function selectSR(a,b,c,d){document.getElementById('marketConditionId').value=a;document.getElementById('marketQuestion').value=b;document.getElementById('marketTokenYes').value=c;document.getElementById('marketTokenNo').value=d;}
+async function addMarket(){const c=document.getElementById('marketConditionId').value.trim(),q=document.getElementById('marketQuestion').value.trim(),y=document.getElementById('marketTokenYes').value.trim(),n=document.getElementById('marketTokenNo').value.trim();if(!c||!q){alert('请填写ID和问题');return;}await api('/markets','POST',{condition_id:c,question:q,token_yes:y||null,token_no:n||null});closeModal('addMarket');loadMarkets();}
+async function removeMarket(id){if(!confirm('确定？'))return;await api('/markets/'+id,'DELETE');loadMarkets();}
 
-    const badge = document.getElementById('botStatus');
-    const btnStart = document.getElementById('btnStart');
-    const btnPause = document.getElementById('btnPause');
-    const btnResume = document.getElementById('btnResume');
-    const btnStop = document.getElementById('btnStop');
+async function loadGroups(){const g=await api('/groups'),t=document.getElementById('groupsTable'),e=document.getElementById('noGroups');if(!g.length){t.innerHTML='';e.style.display='';return;}e.style.display='none';const sn={complement:'互补',multi_outcome:'多结果',correlation:'相关性'};t.innerHTML=g.map(x=>'<tr><td>'+x.name+'</td><td>'+(sn[x.strategy]||x.strategy)+'</td><td>'+(x.market_ids||[]).length+'</td><td><button class="btn btn-danger btn-sm" onclick="removeGroup('+x.id+')">删除</button></td></tr>').join('');}
+async function addGroup(){const n=document.getElementById('groupName').value.trim(),d=document.getElementById('groupDesc').value.trim(),s=document.getElementById('groupStrategy').value,ids=Array.from(document.querySelectorAll('#groupMarketsList input:checked')).map(c=>c.value);if(!n||ids.length<2){alert('名称+至少2市场');return;}await api('/groups','POST',{name:n,description:d,market_ids:ids,strategy:s});closeModal('addGroup');loadGroups();}
+async function removeGroup(id){if(!confirm('确定？'))return;await api('/groups/'+id,'DELETE');loadGroups();}
 
-    if (!botState.running) {
-        badge.textContent = '已停止';
-        badge.className = 'status-badge status-stopped';
-        btnStart.style.display = '';
-        btnPause.style.display = 'none';
-        btnResume.style.display = 'none';
-        btnStop.style.display = 'none';
-    } else if (botState.paused) {
-        badge.textContent = '已暂停';
-        badge.className = 'status-badge status-paused';
-        btnStart.style.display = 'none';
-        btnPause.style.display = 'none';
-        btnResume.style.display = '';
-        btnStop.style.display = '';
-    } else {
-        badge.textContent = '运行中';
-        badge.className = 'status-badge status-running';
-        btnStart.style.display = 'none';
-        btnPause.style.display = '';
-        btnResume.style.display = 'none';
-        btnStop.style.display = '';
-    }
-}
+async function loadRisk(){const r=await api('/risk');document.getElementById('riskMaxPosition').value=r.max_position_size_usd;document.getElementById('riskDailyLoss').value=r.daily_loss_limit_usd;document.getElementById('riskMaxTrade').value=r.max_single_trade_usd;document.getElementById('riskMinSpread').value=r.min_arbitrage_spread;}
+async function saveRisk(){await api('/risk','PUT',{max_position_size_usd:+document.getElementById('riskMaxPosition').value,daily_loss_limit_usd:+document.getElementById('riskDailyLoss').value,max_single_trade_usd:+document.getElementById('riskMaxTrade').value,min_arbitrage_spread:+document.getElementById('riskMinSpread').value});addLog('风险设置已更新','info');}
 
-function updatePnl(id, value) {
-    const el = document.getElementById(id);
-    el.textContent = '$' + value.toFixed(2);
-    el.className = 'stat-value ' + (value >= 0 ? 'stat-positive' : 'stat-negative');
-}
+async function loadTrades(){const t=await api('/trades?limit=30'),tb=document.getElementById('tradesTable'),e=document.getElementById('noTrades');if(!t.length){tb.innerHTML='';e.style.display='';return;}e.style.display='none';tb.innerHTML=t.map(x=>'<tr><td>'+new Date(x.created_at).toLocaleString()+'</td><td style="color:'+(x.side==='BUY'?'#22c55e':'#ef4444')+'">'+x.side+'</td><td>$'+x.price.toFixed(3)+'</td><td>'+x.size.toFixed(2)+'</td><td>$'+x.amount_usd.toFixed(2)+'</td><td>'+x.status+'</td></tr>').join('');}
 
-// ============================================================
-// Markets
-// ============================================================
-async function loadMarkets() {
-    markets = await api('/markets');
-    const tbody = document.getElementById('marketsTable');
-    const empty = document.getElementById('noMarkets');
+async function loadAlerts(){const a=await api('/alerts?limit=20'),c=document.getElementById('alertsList');document.getElementById('alertCount').textContent=a.filter(x=>!x.resolved).length+' 条未解决';if(!a.length){c.innerHTML='<div style="text-align:center;padding:20px;color:#94a3b8">暂无警报</div>';return;}c.innerHTML=a.map(x=>'<div class="alert-item alert-'+x.level+(x.resolved?' alert-resolved':'')+'"><div><strong>'+x.level.toUpperCase()+'</strong> '+x.message+'</div>'+(!x.resolved?'<button class="btn btn-ghost btn-sm" onclick="resolveAlert('+x.id+')">解决</button>':'')+'</div>').join('');}
+async function resolveAlert(id){await api('/alerts/'+id+'/resolve','POST');loadAlerts();}
 
-    if (markets.length === 0) {
-        tbody.innerHTML = '';
-        empty.style.display = '';
-        document.getElementById('statMarkets').textContent = '0';
-        return;
-    }
+function renderOpportunities(opps){const c=document.getElementById('oppsList');if(!opps||!opps.length){c.innerHTML='<div style="text-align:center;padding:20px;color:#94a3b8">暂未发现套利机会</div>';return;}c.innerHTML=opps.map(o=>'<div class="opp-card"><div style="display:flex;justify-content:space-between"><div><div class="opp-spread">'+(o.spread*100).toFixed(2)+'%</div><div class="opp-detail">'+o.strategy+' | '+o.legs+'腿</div></div><div style="text-align:right;color:#22c55e;font-weight:700">+$'+o.expected_profit.toFixed(2)+'</div></div></div>').join('');}
 
-    empty.style.display = 'none';
-    document.getElementById('statMarkets').textContent = markets.length;
-    tbody.innerHTML = markets.map(m => `
-        <tr>
-            <td title="${m.condition_id}">${m.question}</td>
-            <td>-</td>
-            <td>-</td>
-            <td>-</td>
-            <td><button class="btn btn-danger btn-sm" onclick="removeMarket('${m.condition_id}')">删除</button></td>
-        </tr>
-    `).join('');
-}
+function addLog(m,t){const f=document.getElementById('logFeed'),d=document.createElement('div');d.className='log-entry '+(t||'info');d.innerHTML='<span class="time">['+new Date().toLocaleTimeString()+']</span> '+m;f.appendChild(d);f.scrollTop=f.scrollHeight;while(f.children.length>200)f.removeChild(f.firstChild);}
+function clearLog(){document.getElementById('logFeed').innerHTML='';}
 
-async function searchMarkets() {
-    clearTimeout(searchTimeout);
-    const q = document.getElementById('marketSearch').value;
-    if (q.length < 2) return;
-    searchTimeout = setTimeout(async () => {
-        const results = await api('/markets/search?q=' + encodeURIComponent(q));
-        const container = document.getElementById('searchResults');
-        if (Array.isArray(results) && results.length > 0) {
-            container.innerHTML = results.map(m => `
-                <div style="padding:8px;border-bottom:1px solid #334155;cursor:pointer;font-size:13px"
-                     onclick="selectSearchResult('${m.condition_id || ''}', '${(m.question || '').replace(/'/g, "\\'")}',
-                              '${m.tokens?.[0]?.token_id || ''}', '${m.tokens?.[1]?.token_id || ''}')">
-                    ${m.question || m.description || 'Unknown'}
-                </div>
-            `).join('');
-        } else {
-            container.innerHTML = '<div style="padding:8px;color:#94a3b8;font-size:13px">未找到结果</div>';
-        }
-    }, 500);
-}
+function openModal(n){document.getElementById('modal'+n.charAt(0).toUpperCase()+n.slice(1)).classList.add('active');if(n==='addGroup'){const c=document.getElementById('groupMarketsList');c.innerHTML=markets.map(m=>'<label style="display:block;padding:4px 0;font-size:13px"><input type="checkbox" value="'+m.condition_id+'" style="margin-right:8px">'+m.question+'</label>').join('')||'<div style="color:#94a3b8">请先添加市场</div>';}if(n==='settings')loadSettingsForm();}
+function closeModal(n){document.getElementById('modal'+n.charAt(0).toUpperCase()+n.slice(1)).classList.remove('active');}
 
-function selectSearchResult(conditionId, question, tokenYes, tokenNo) {
-    document.getElementById('marketConditionId').value = conditionId;
-    document.getElementById('marketQuestion').value = question;
-    document.getElementById('marketTokenYes').value = tokenYes;
-    document.getElementById('marketTokenNo').value = tokenNo;
-}
+async function loadSettingsForm(){const d=await api('/settings');document.querySelectorAll('.setting-input').forEach(el=>{const k=el.dataset.key;if(!d[k])return;el.tagName==='SELECT'?el.value=d[k].value||'0':el.value=d[k].value||'';if(el.type==='password'){el.style.borderColor=d[k].is_set?'#22c55e':'#ef4444';}});}
+async function saveSettings(){const s={};document.querySelectorAll('.setting-input').forEach(el=>s[el.dataset.key]=el.value);const m=document.getElementById('settingsMsg');try{await api('/settings','PUT',{settings:s});m.style.display='';m.style.background='#065f46';m.style.color='#6ee7b7';m.textContent='已保存！';addLog('设置已更新','info');setTimeout(()=>checkApi(),1000);setTimeout(()=>m.style.display='none',3000);}catch(e){m.style.display='';m.style.background='#7f1d1d';m.style.color='#fca5a5';m.textContent='失败: '+e.message;}}
+async function testConnection(){const b=document.getElementById('btnTestConn'),m=document.getElementById('settingsMsg');b.disabled=true;b.textContent='测试中...';m.style.display='';m.style.background='#1e3a5f';m.style.color='#93c5fd';m.textContent='正在测试...';try{const r=await api('/connection/test');m.style.background=r.auth_ok?'#065f46':r.clob_reachable?'#78350f':'#7f1d1d';m.style.color=r.auth_ok?'#6ee7b7':r.clob_reachable?'#fcd34d':'#fca5a5';m.textContent=r.message;}catch(e){m.style.background='#7f1d1d';m.style.color='#fca5a5';m.textContent='失败: '+e.message;}b.disabled=false;b.textContent='测试连接';}
+async function checkApi(){try{const r=await api('/connection/test');const d=document.getElementById('apiDot'),s=document.getElementById('apiStatus');if(r.auth_ok){d.style.background='#22c55e';s.textContent='API 已连接';s.style.color='#22c55e';}else if(r.api_configured){d.style.background='#f59e0b';s.textContent='认证失败';s.style.color='#f59e0b';}else{d.style.background='#ef4444';s.textContent='API 未配置';s.style.color='#ef4444';}}catch{}}
 
-async function addMarket() {
-    const conditionId = document.getElementById('marketConditionId').value.trim();
-    const question = document.getElementById('marketQuestion').value.trim();
-    const tokenYes = document.getElementById('marketTokenYes').value.trim();
-    const tokenNo = document.getElementById('marketTokenNo').value.trim();
+async function loadStatus(){const s=await api('/bot/status');updateBotState({running:s.running,paused:s.paused,daily_pnl:s.daily_pnl,total_pnl:s.total_pnl});if(!s.trading_ready)addLog('凭证未配置 - 点击齿轮图标设置','error');}
 
-    if (!conditionId || !question) {
-        alert('请填写 Condition ID 和市场问题');
-        return;
-    }
-
-    await api('/markets', 'POST', {
-        condition_id: conditionId,
-        question: question,
-        token_yes: tokenYes || null,
-        token_no: tokenNo || null,
-    });
-    closeModal('addMarket');
-    loadMarkets();
-    addLog(`添加市场: ${question}`, 'info');
-}
-
-async function removeMarket(conditionId) {
-    if (!confirm('确定删除此市场？')) return;
-    await api('/markets/' + conditionId, 'DELETE');
-    loadMarkets();
-}
-
-// ============================================================
-// Groups
-// ============================================================
-async function loadGroups() {
-    const groups = await api('/groups');
-    const tbody = document.getElementById('groupsTable');
-    const empty = document.getElementById('noGroups');
-
-    if (groups.length === 0) {
-        tbody.innerHTML = '';
-        empty.style.display = '';
-        return;
-    }
-
-    empty.style.display = 'none';
-    const strategyNames = { complement: '互补', multi_outcome: '多结果', correlation: '相关性' };
-    tbody.innerHTML = groups.map(g => `
-        <tr>
-            <td>${g.name}</td>
-            <td>${strategyNames[g.strategy] || g.strategy}</td>
-            <td>${(g.market_ids || []).length}</td>
-            <td><button class="btn btn-danger btn-sm" onclick="removeGroup(${g.id})">删除</button></td>
-        </tr>
-    `).join('');
-}
-
-async function addGroup() {
-    const name = document.getElementById('groupName').value.trim();
-    const desc = document.getElementById('groupDesc').value.trim();
-    const strategy = document.getElementById('groupStrategy').value;
-    const checks = document.querySelectorAll('#groupMarketsList input:checked');
-    const marketIds = Array.from(checks).map(c => c.value);
-
-    if (!name || marketIds.length < 2) {
-        alert('请输入名称并至少选择2个市场');
-        return;
-    }
-
-    await api('/groups', 'POST', { name, description: desc, market_ids: marketIds, strategy });
-    closeModal('addGroup');
-    loadGroups();
-}
-
-async function removeGroup(id) {
-    if (!confirm('确定删除此分组？')) return;
-    await api('/groups/' + id, 'DELETE');
-    loadGroups();
-}
-
-// ============================================================
-// Risk
-// ============================================================
-async function loadRisk() {
-    const risk = await api('/risk');
-    document.getElementById('riskMaxPosition').value = risk.max_position_size_usd;
-    document.getElementById('riskDailyLoss').value = risk.daily_loss_limit_usd;
-    document.getElementById('riskMaxTrade').value = risk.max_single_trade_usd;
-    document.getElementById('riskMinSpread').value = risk.min_arbitrage_spread;
-}
-
-async function saveRisk() {
-    await api('/risk', 'PUT', {
-        max_position_size_usd: parseFloat(document.getElementById('riskMaxPosition').value),
-        daily_loss_limit_usd: parseFloat(document.getElementById('riskDailyLoss').value),
-        max_single_trade_usd: parseFloat(document.getElementById('riskMaxTrade').value),
-        min_arbitrage_spread: parseFloat(document.getElementById('riskMinSpread').value),
-    });
-    addLog('风险设置已更新', 'info');
-}
-
-// ============================================================
-// Trades
-// ============================================================
-async function loadTrades() {
-    const trades = await api('/trades?limit=30');
-    const tbody = document.getElementById('tradesTable');
-    const empty = document.getElementById('noTrades');
-
-    if (trades.length === 0) {
-        tbody.innerHTML = '';
-        empty.style.display = '';
-        return;
-    }
-
-    empty.style.display = 'none';
-    tbody.innerHTML = trades.map(t => `
-        <tr>
-            <td>${new Date(t.created_at).toLocaleString()}</td>
-            <td style="color:${t.side === 'BUY' ? '#22c55e' : '#ef4444'}">${t.side}</td>
-            <td>$${t.price.toFixed(3)}</td>
-            <td>${t.size.toFixed(2)}</td>
-            <td>$${t.amount_usd.toFixed(2)}</td>
-            <td>${t.status}</td>
-        </tr>
-    `).join('');
-}
-
-// ============================================================
-// Alerts
-// ============================================================
-async function loadAlerts() {
-    const alerts = await api('/alerts?limit=20');
-    const container = document.getElementById('alertsList');
-    const unresolved = alerts.filter(a => !a.resolved);
-    document.getElementById('alertCount').textContent = unresolved.length + ' 条未解决';
-
-    if (alerts.length === 0) {
-        container.innerHTML = '<div style="text-align:center;padding:20px;color:#94a3b8">暂无警报</div>';
-        return;
-    }
-
-    container.innerHTML = alerts.map(a => `
-        <div class="alert-item alert-${a.level} ${a.resolved ? 'alert-resolved' : ''}">
-            <div>
-                <strong>${a.level.toUpperCase()}</strong> ${a.message}
-                <div style="font-size:11px;color:#94a3b8">${new Date(a.created_at).toLocaleString()}</div>
-            </div>
-            ${!a.resolved ? `<button class="btn btn-ghost btn-sm" onclick="resolveAlert(${a.id})">解决</button>` : ''}
-        </div>
-    `).join('');
-}
-
-async function resolveAlert(id) {
-    await api('/alerts/' + id + '/resolve', 'POST');
-    loadAlerts();
-}
-
-// ============================================================
-// Opportunities
-// ============================================================
-function renderOpportunities(opps) {
-    const container = document.getElementById('oppsList');
-    if (!opps || opps.length === 0) {
-        container.innerHTML = '<div style="text-align:center;padding:20px;color:#94a3b8">暂未发现套利机会</div>';
-        return;
-    }
-
-    const strategyNames = { complement: '互补', multi_outcome: '多结果', correlation: '相关性' };
-    container.innerHTML = opps.map(o => `
-        <div class="opp-card">
-            <div style="display:flex;justify-content:space-between;align-items:center">
-                <div>
-                    <div class="opp-spread">${(o.spread * 100).toFixed(2)}% 价差</div>
-                    <div class="opp-detail">${strategyNames[o.strategy] || o.strategy} | ${o.legs} 条腿 | 置信度 ${(o.confidence * 100).toFixed(0)}%</div>
-                </div>
-                <div style="text-align:right">
-                    <div style="color:#22c55e;font-weight:700">+$${o.expected_profit.toFixed(2)}</div>
-                    <div class="opp-detail">${o.group}</div>
-                </div>
-            </div>
-        </div>
-    `).join('');
-}
-
-// ============================================================
-// Logging
-// ============================================================
-function addLog(message, type = 'info') {
-    const feed = document.getElementById('logFeed');
-    const time = new Date().toLocaleTimeString();
-    const div = document.createElement('div');
-    div.className = 'log-entry ' + type;
-    div.innerHTML = `<span class="time">[${time}]</span> ${message}`;
-    feed.appendChild(div);
-    feed.scrollTop = feed.scrollHeight;
-
-    // Keep last 200 entries
-    while (feed.children.length > 200) {
-        feed.removeChild(feed.firstChild);
-    }
-}
-
-function clearLog() {
-    document.getElementById('logFeed').innerHTML = '';
-}
-
-// ============================================================
-// Modals
-// ============================================================
-function openModal(name) {
-    document.getElementById('modal' + name.charAt(0).toUpperCase() + name.slice(1)).classList.add('active');
-    if (name === 'addGroup') {
-        // Populate market checkboxes
-        const container = document.getElementById('groupMarketsList');
-        container.innerHTML = markets.map(m => `
-            <label style="display:block;padding:4px 0;font-size:13px;cursor:pointer">
-                <input type="checkbox" value="${m.condition_id}" style="margin-right:8px">
-                ${m.question}
-            </label>
-        `).join('') || '<div style="color:#94a3b8;font-size:13px">请先添加监控市场</div>';
-    }
-}
-
-function closeModal(name) {
-    document.getElementById('modal' + name.charAt(0).toUpperCase() + name.slice(1)).classList.remove('active');
-}
-
-// ============================================================
-// Status loader
-// ============================================================
-async function loadStatus() {
-    const status = await api('/bot/status');
-    updateBotState({
-        running: status.running,
-        paused: status.paused,
-        daily_pnl: status.daily_pnl,
-        total_pnl: status.total_pnl,
-    });
-    if (!status.trading_ready) {
-        addLog('⚠ 交易凭证未配置 - 仅监控模式 (请在 .env 中设置 POLYMARKET_PRIVATE_KEY)', 'error');
-    }
-}
-
-// ============================================================
-// Init
-// ============================================================
-async function init() {
-    await loadStatus();
-    await loadMarkets();
-    await loadGroups();
-    await loadRisk();
-    await loadTrades();
-    await loadAlerts();
-    connectWS();
-
-    // Refresh data periodically
-    setInterval(loadMarkets, 30000);
-    setInterval(loadTrades, 30000);
-    setInterval(loadAlerts, 15000);
-}
-
+async function init(){await loadStatus();await loadMarkets();await loadGroups();await loadRisk();await loadTrades();await loadAlerts();connectWS();checkApi();setInterval(loadMarkets,30000);setInterval(loadTrades,30000);setInterval(loadAlerts,15000);setInterval(checkApi,60000);}
 init();
 </script>
 </body>
