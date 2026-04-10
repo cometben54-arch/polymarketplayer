@@ -26,21 +26,25 @@ const CLOB = (e: Env) => (e.POLYMARKET_API_URL || 'https://clob.polymarket.com')
 const GAMMA = (e: Env) => (e.GAMMA_API_URL || 'https://gamma-api.polymarket.com').replace(/\/$/, '');
 
 async function hmacSign(secret: string, msg: string): Promise<string> {
-  // Convert URL-safe base64 to standard base64, then decode
+  // Decode secret: URL-safe base64 -> standard base64 -> bytes
   const std = secret.replace(/-/g, '+').replace(/_/g, '/');
   const padded = std + '='.repeat((4 - std.length % 4) % 4);
   const raw = atob(padded);
   const kd = Uint8Array.from(raw, c => c.charCodeAt(0));
   const key = await crypto.subtle.importKey('raw', kd, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
   const sig = await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(msg));
-  return btoa(String.fromCharCode(...new Uint8Array(sig)));
+  // Output: URL-safe base64 WITH = padding (per official client)
+  const b64 = btoa(String.fromCharCode(...new Uint8Array(sig)));
+  return b64.replace(/\+/g, '-').replace(/\//g, '_');
 }
 
 async function authHeaders(env: Env, method: string, path: string, body = ''): Promise<Record<string, string>> {
   if (!env.POLYMARKET_API_KEY || !env.POLYMARKET_API_SECRET) return {};
   const ts = Math.floor(Date.now() / 1000).toString();
-  const sig = await hmacSign(env.POLYMARKET_API_SECRET, ts + method.toUpperCase() + path + body);
+  const message = ts + method.toUpperCase() + path + (body || '');
+  const sig = await hmacSign(env.POLYMARKET_API_SECRET, message);
   return {
+    'POLY_ADDRESS': env.POLYMARKET_FUNDER_ADDRESS || '',
     'POLY_API_KEY': env.POLYMARKET_API_KEY,
     'POLY_SIGNATURE': sig,
     'POLY_TIMESTAMP': ts,
