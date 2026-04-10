@@ -40,13 +40,26 @@
 </div>
 
 <!-- Add Market Modal -->
-<div class="modal-backdrop" id="modalAddMarket"><div class="modal"><h3>添加监控市场</h3>
-    <div class="form-group"><label>搜索市场</label><input type="text" class="form-control" id="marketSearch" placeholder="输入关键词..." oninput="searchMarkets()"></div>
-    <div id="searchResults" style="max-height:200px;overflow-y:auto;margin-bottom:14px"></div><hr style="border-color:#334155;margin:14px 0"><h4 style="font-size:14px;margin-bottom:10px">或手动输入</h4>
-    <div class="form-group"><label>Condition ID</label><input type="text" class="form-control" id="marketConditionId" placeholder="0x..."></div>
-    <div class="form-group"><label>问题</label><input type="text" class="form-control" id="marketQuestion"></div>
-    <div class="form-row"><div class="form-group"><label>YES Token</label><input type="text" class="form-control" id="marketTokenYes"></div><div class="form-group"><label>NO Token</label><input type="text" class="form-control" id="marketTokenNo"></div></div>
-    <div style="display:flex;gap:8px;justify-content:flex-end"><button class="btn btn-ghost" onclick="closeModal('addMarket')">取消</button><button class="btn btn-primary" onclick="addMarket()">添加</button></div>
+<div class="modal-backdrop" id="modalAddMarket"><div class="modal" style="max-width:560px">
+    <h3>添加监控市场</h3>
+    <div class="form-group">
+        <label>粘贴 Polymarket 链接</label>
+        <input type="text" class="form-control" id="marketUrl" placeholder="https://polymarket.com/event/..." style="margin-bottom:8px">
+        <button class="btn btn-primary" onclick="resolveMarketUrl()" id="btnResolve" style="width:100%">解析市场</button>
+    </div>
+    <div id="resolveStatus" style="text-align:center;padding:8px;border-radius:6px;display:none;margin-bottom:12px"></div>
+    <div id="resolvedMarkets" style="max-height:300px;overflow-y:auto"></div>
+    <hr style="border-color:#334155;margin:14px 0">
+    <details style="margin-bottom:12px">
+        <summary style="cursor:pointer;font-size:13px;color:#94a3b8">高级：手动输入 ID</summary>
+        <div style="margin-top:10px">
+            <div class="form-group"><label>Condition ID</label><input type="text" class="form-control" id="marketConditionId" placeholder="0x..."></div>
+            <div class="form-group"><label>问题</label><input type="text" class="form-control" id="marketQuestion"></div>
+            <div class="form-row"><div class="form-group"><label>YES Token</label><input type="text" class="form-control" id="marketTokenYes"></div><div class="form-group"><label>NO Token</label><input type="text" class="form-control" id="marketTokenNo"></div></div>
+            <button class="btn btn-primary btn-sm" onclick="addMarketManual()">手动添加</button>
+        </div>
+    </details>
+    <div style="text-align:right"><button class="btn btn-ghost" onclick="closeModal('addMarket')">关闭</button></div>
 </div></div>
 <!-- Add Group Modal -->
 <div class="modal-backdrop" id="modalAddGroup"><div class="modal"><h3>创建套利分组</h3>
@@ -73,6 +86,11 @@
     <div style="background:#1e293b;border-radius:8px;padding:14px;margin-bottom:16px"><h4 style="font-size:14px;margin-bottom:10px;color:#60a5fa">钱包配置</h4>
         <div class="form-group"><label>Private Key</label><input type="text" class="form-control setting-input" data-key="POLYMARKET_PRIVATE_KEY" readonly style="opacity:0.7"></div>
         <div class="form-group"><label>钱包地址</label><input type="text" class="form-control setting-input" data-key="POLYMARKET_FUNDER_ADDRESS" readonly style="opacity:0.7"></div></div>
+    <div style="background:#1e293b;border-radius:8px;padding:14px;margin-bottom:16px"><h4 style="font-size:14px;margin-bottom:10px;color:#60a5fa">AI 辅助分析</h4><small style="color:#94a3b8;font-size:11px;display:block;margin-bottom:8px">接入 AI 模型辅助套利决策分析</small>
+        <div class="form-group"><label>AI 服务商</label><select class="form-control setting-input" data-key="AI_PROVIDER"><option value="openai">OpenAI (GPT)</option><option value="anthropic">Anthropic (Claude)</option><option value="custom">自定义 API</option></select></div>
+        <div class="form-group"><label>AI API Key</label><input type="password" class="form-control setting-input" data-key="AI_API_KEY" placeholder="sk-..."></div>
+        <div class="form-group"><label>AI Model</label><input type="text" class="form-control setting-input" data-key="AI_MODEL" placeholder="gpt-4o / claude-sonnet-4-20250514"></div>
+        <div class="form-group"><label>自定义 API Base URL (可选)</label><input type="text" class="form-control setting-input" data-key="AI_BASE_URL" placeholder="https://api.openai.com/v1"></div></div>
     <div style="background:#1e293b;border-radius:8px;padding:14px;margin-bottom:16px"><h4 style="font-size:14px;margin-bottom:10px;color:#60a5fa">风险控制 (可修改)</h4>
         <div class="form-row"><div class="form-group"><label>最大持仓</label><input type="number" class="form-control setting-input" data-key="MAX_POSITION_SIZE_USD"></div><div class="form-group"><label>日亏损限额</label><input type="number" class="form-control setting-input" data-key="DAILY_LOSS_LIMIT_USD"></div></div>
         <div class="form-row"><div class="form-group"><label>单笔上限</label><input type="number" class="form-control setting-input" data-key="MAX_SINGLE_TRADE_USD"></div><div class="form-group"><label>最小价差</label><input type="number" class="form-control setting-input" data-key="MIN_ARBITRAGE_SPREAD" step="0.005"></div></div></div>
@@ -91,9 +109,29 @@ function updatePnl(id, v) { const e = document.getElementById(id); e.textContent
 
 // Markets
 async function loadMarkets() { markets = await api('/markets'); const t = document.getElementById('marketsTable'), e = document.getElementById('noMarkets'); if (!markets.length) { t.innerHTML = ''; e.style.display = ''; document.getElementById('statMarkets').textContent = '0'; return; } e.style.display = 'none'; document.getElementById('statMarkets').textContent = markets.length; t.innerHTML = markets.map(m => '<tr><td title="' + m.condition_id + '">' + m.question + '</td><td>-</td><td>-</td><td>-</td><td><button class="btn btn-danger btn-sm" onclick="removeMarket(\'' + m.condition_id + '\')">删除</button></td></tr>').join(''); }
-async function searchMarkets() { clearTimeout(searchTimeout); const q = document.getElementById('marketSearch').value; if (q.length < 2) return; searchTimeout = setTimeout(async () => { const r = await api('/markets/search?q=' + encodeURIComponent(q)); const c = document.getElementById('searchResults'); if (Array.isArray(r) && r.length) c.innerHTML = r.map(m => '<div style="padding:8px;border-bottom:1px solid #334155;cursor:pointer;font-size:13px" onclick="selectSR(\'' + (m.condition_id || '') + "','" + ((m.question || '').replace(/'/g, "\\'")) + "','" + (m.tokens?.[0]?.token_id || '') + "','" + (m.tokens?.[1]?.token_id || '') + "')\">" + (m.question || '?') + '</div>').join(''); else c.innerHTML = '<div style="padding:8px;color:#94a3b8">未找到</div>'; }, 500); }
-function selectSR(a, b, c, d) { document.getElementById('marketConditionId').value = a; document.getElementById('marketQuestion').value = b; document.getElementById('marketTokenYes').value = c; document.getElementById('marketTokenNo').value = d; }
-async function addMarket() { const c = document.getElementById('marketConditionId').value.trim(), q = document.getElementById('marketQuestion').value.trim(); if (!c || !q) { alert('请填写ID和问题'); return; } await api('/markets', 'POST', { condition_id: c, question: q, token_yes: document.getElementById('marketTokenYes').value.trim() || null, token_no: document.getElementById('marketTokenNo').value.trim() || null }); closeModal('addMarket'); loadMarkets(); }
+async function resolveMarketUrl() {
+  const url = document.getElementById('marketUrl').value.trim();
+  if (!url || !url.includes('polymarket.com')) { alert('请粘贴 Polymarket 链接'); return; }
+  const btn = document.getElementById('btnResolve'), status = document.getElementById('resolveStatus'), container = document.getElementById('resolvedMarkets');
+  btn.disabled = true; btn.textContent = '解析中...';
+  status.style.display = ''; status.style.background = '#1e3a5f'; status.style.color = '#93c5fd'; status.textContent = '正在从 Polymarket 获取市场信息...';
+  try {
+    const r = await api('/markets/resolve-url', 'POST', { url });
+    if (r.error) { status.style.background = '#7f1d1d'; status.style.color = '#fca5a5'; status.textContent = r.error; container.innerHTML = ''; }
+    else if (r.markets && r.markets.length) {
+      status.style.background = '#065f46'; status.style.color = '#6ee7b7'; status.textContent = '找到 ' + r.markets.length + ' 个市场 (' + (r.event || r.slug) + ')';
+      container.innerHTML = r.markets.map((m, i) => '<div style="background:#1e293b;border-radius:8px;padding:12px;margin-bottom:8px;border-left:3px solid #5b6ef5"><div style="font-size:14px;font-weight:600;margin-bottom:6px">' + (m.question || 'Market ' + (i + 1)) + '</div><div style="font-size:11px;color:#94a3b8;margin-bottom:8px">ID: ' + (m.condition_id || 'N/A').slice(0, 20) + '...</div><button class="btn btn-success btn-sm" onclick="addResolvedMarket(\'' + (m.condition_id || '').replace(/'/g, '') + "','" + (m.question || '').replace(/'/g, "\\'") + "','" + (m.token_yes || '') + "','" + (m.token_no || '') + "')\" id=\"addBtn" + i + '">+ 添加此市场</button></div>').join('');
+    } else { status.style.background = '#78350f'; status.style.color = '#fcd34d'; status.textContent = '未找到市场'; container.innerHTML = ''; }
+  } catch (e) { status.style.background = '#7f1d1d'; status.style.color = '#fca5a5'; status.textContent = '解析失败: ' + e.message; }
+  btn.disabled = false; btn.textContent = '解析市场';
+}
+async function addResolvedMarket(cid, q, ty, tn) {
+  if (!cid) { alert('缺少 Condition ID'); return; }
+  await api('/markets', 'POST', { condition_id: cid, question: q, token_yes: ty || null, token_no: tn || null });
+  event.target.textContent = '已添加'; event.target.disabled = true; event.target.className = 'btn btn-ghost btn-sm';
+  loadMarkets(); addLog('已添加: ' + q, 'info');
+}
+async function addMarketManual() { const c = document.getElementById('marketConditionId').value.trim(), q = document.getElementById('marketQuestion').value.trim(); if (!c || !q) { alert('请填写ID和问题'); return; } await api('/markets', 'POST', { condition_id: c, question: q, token_yes: document.getElementById('marketTokenYes').value.trim() || null, token_no: document.getElementById('marketTokenNo').value.trim() || null }); closeModal('addMarket'); loadMarkets(); }
 async function removeMarket(id) { if (!confirm('确定？')) return; await api('/markets/' + id, 'DELETE'); loadMarkets(); }
 
 // Groups

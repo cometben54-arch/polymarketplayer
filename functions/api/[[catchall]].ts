@@ -177,6 +177,78 @@ app.get('/markets/search', async c => {
   } catch { return c.json([]); }
 });
 
+// Resolve a Polymarket URL to market details
+app.post('/markets/resolve-url', async c => {
+  const { url } = await c.req.json<{ url: string }>();
+  if (!url) return c.json({ error: 'URL is required' }, 400);
+
+  // Extract slug from URL: https://polymarket.com/event/{slug} or /event/{slug}/{market-slug}
+  const match = url.match(/polymarket\.com\/event\/([a-z0-9-]+)/i);
+  if (!match) return c.json({ error: 'Invalid Polymarket URL' }, 400);
+  const slug = match[1];
+
+  try {
+    // Try Gamma events API first
+    const evtRes = await fetch(`${GAMMA(c.env)}/events?slug=${slug}`);
+    if (evtRes.ok) {
+      const events: any[] = await evtRes.json();
+      if (events.length > 0 && events[0].markets) {
+        const markets = events[0].markets.map((m: any) => ({
+          condition_id: m.conditionId || m.condition_id || '',
+          question: m.question || m.groupItemTitle || events[0].title || '',
+          token_yes: m.clobTokenIds?.[0] || m.tokens?.find((t: any) => t.outcome === 'Yes')?.token_id || '',
+          token_no: m.clobTokenIds?.[1] || m.tokens?.find((t: any) => t.outcome === 'No')?.token_id || '',
+          slug: m.slug || slug,
+          active: m.active,
+          closed: m.closed,
+        }));
+        return c.json({ event: events[0].title, slug, markets });
+      }
+    }
+
+    // Fallback: try markets API with slug
+    const mktRes = await fetch(`${GAMMA(c.env)}/markets?slug=${slug}&limit=10`);
+    if (mktRes.ok) {
+      const mkts: any[] = await mktRes.json();
+      if (mkts.length > 0) {
+        const markets = mkts.map((m: any) => ({
+          condition_id: m.conditionId || m.condition_id || '',
+          question: m.question || '',
+          token_yes: m.clobTokenIds?.[0] || '',
+          token_no: m.clobTokenIds?.[1] || '',
+          slug: m.slug || slug,
+        }));
+        return c.json({ event: mkts[0].question, slug, markets });
+      }
+    }
+
+    // Fallback: search by slug keywords
+    const keywords = slug.replace(/-/g, ' ');
+    const searchRes = await fetch(`${GAMMA(c.env)}/markets?limit=10&active=true`);
+    if (searchRes.ok) {
+      const all: any[] = await searchRes.json();
+      const filtered = all.filter((m: any) => {
+        const q = ((m.question || '') + (m.slug || '')).toLowerCase();
+        return slug.split('-').filter((w: string) => w.length > 2).some((w: string) => q.includes(w));
+      });
+      if (filtered.length > 0) {
+        const markets = filtered.slice(0, 5).map((m: any) => ({
+          condition_id: m.conditionId || m.condition_id || '',
+          question: m.question || '',
+          token_yes: m.clobTokenIds?.[0] || '',
+          token_no: m.clobTokenIds?.[1] || '',
+          slug: m.slug || '',
+        }));
+        return c.json({ event: keywords, slug, markets });
+      }
+    }
+
+    return c.json({ error: 'Market not found for slug: ' + slug, slug });
+  } catch (e: any) {
+    return c.json({ error: 'Failed to resolve: ' + e.message });
+  }
+});
+
 // Groups
 app.get('/groups', async c => { const r = await c.env.DB.prepare('SELECT * FROM arbitrage_groups WHERE active=1').all(); return c.json(r.results.map((x: any) => ({ ...x, market_ids: JSON.parse(x.market_ids || '[]') }))); });
 app.post('/groups', async c => { const b = await c.req.json(); await c.env.DB.prepare('INSERT INTO arbitrage_groups(name,description,market_ids,strategy) VALUES(?,?,?,?)').bind(b.name, b.description || '', JSON.stringify(b.market_ids), b.strategy || 'complement').run(); return c.json({ status: 'created' }); });
@@ -217,7 +289,7 @@ app.get('/settings', async c => {
 });
 app.put('/settings', async c => {
   const { settings } = await c.req.json<{ settings: Record<string, string> }>();
-  const db = c.env.DB; const dbKeys = ['MAX_POSITION_SIZE_USD', 'DAILY_LOSS_LIMIT_USD', 'MAX_SINGLE_TRADE_USD', 'MIN_ARBITRAGE_SPREAD', 'POLL_INTERVAL'];
+  const db = c.env.DB; const dbKeys = ['MAX_POSITION_SIZE_USD', 'DAILY_LOSS_LIMIT_USD', 'MAX_SINGLE_TRADE_USD', 'MIN_ARBITRAGE_SPREAD', 'POLL_INTERVAL', 'AI_PROVIDER', 'AI_API_KEY', 'AI_MODEL', 'AI_BASE_URL'];
   for (const [k, v] of Object.entries(settings)) { if (dbKeys.includes(k) && v && !v.includes('*')) await db.prepare('INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)').bind(k, v).run(); }
   return c.json({ status: 'saved' });
 });
