@@ -10,7 +10,7 @@
 
 <!-- Header -->
 <div class="header">
-    <h1><span>&#9670;</span> Polymarket 套利机器人 <span style="font-size:10px;color:#64748b;font-weight:400;margin-left:8px">v1.8.0 | 2026-04-10</span></h1>
+    <h1><span>&#9670;</span> Polymarket 套利机器人 <span style="font-size:10px;color:#64748b;font-weight:400;margin-left:8px">v2.0.0 | 2026-04-10</span></h1>
     <div class="header-controls">
         <span id="apiDot" style="width:8px;height:8px;border-radius:50%;display:inline-block;background:#ef4444"></span>
         <span id="apiStatus" style="font-size:12px;color:#94a3b8">检测中...</span>
@@ -30,7 +30,22 @@
         <div class="stat-card"><div class="stat-value" id="statMarkets">0</div><div class="stat-label">监控市场</div></div>
         <div class="stat-card"><div class="stat-value" id="statOpps">0</div><div class="stat-label">发现机会</div></div>
     </div>
-    <div class="card"><div class="card-header"><h2>监控市场</h2><button class="btn btn-primary btn-sm" onclick="openModal('addMarket')">+ 添加市场</button></div><div class="card-body"><div class="table-wrap"><table><thead><tr><th>问题</th><th>YES</th><th>NO</th><th>价差</th><th>操作</th></tr></thead><tbody id="marketsTable"></tbody></table></div><div id="noMarkets" style="text-align:center;padding:20px;color:#94a3b8">暂无监控市场</div></div></div>
+    <!-- Mode & Strategy Control -->
+    <div class="card full-width"><div class="card-body" style="display:flex;gap:20px;flex-wrap:wrap;align-items:center">
+        <div><label style="font-size:12px;color:#94a3b8;font-weight:600">运行模式</label><div style="display:flex;gap:6px;margin-top:4px">
+            <button class="btn btn-sm" id="modePaper" onclick="setMode('paper')" style="background:#f59e0b;color:#000">模拟交易</button>
+            <button class="btn btn-sm" id="modeReal" onclick="setMode('real')" style="background:#334155;color:#94a3b8">真实交易</button>
+        </div></div>
+        <div style="flex:1"><label style="font-size:12px;color:#94a3b8;font-weight:600">启用策略 (可多选)</label><div style="display:flex;gap:6px;margin-top:4px;flex-wrap:wrap">
+            <label style="font-size:12px;cursor:pointer;background:#252840;padding:4px 10px;border-radius:6px"><input type="checkbox" value="complement" class="strat-cb" style="margin-right:4px" checked> 互补套利</label>
+            <label style="font-size:12px;cursor:pointer;background:#252840;padding:4px 10px;border-radius:6px"><input type="checkbox" value="probability" class="strat-cb" style="margin-right:4px" checked> 概率偏差(AI)</label>
+            <label style="font-size:12px;cursor:pointer;background:#252840;padding:4px 10px;border-radius:6px"><input type="checkbox" value="market_making" class="strat-cb" style="margin-right:4px" checked> 做市商</label>
+            <label style="font-size:12px;cursor:pointer;background:#252840;padding:4px 10px;border-radius:6px"><input type="checkbox" value="momentum" class="strat-cb" style="margin-right:4px" checked> 动量套利</label>
+        </div></div>
+        <button class="btn btn-ghost btn-sm" onclick="saveStrategies()">保存策略</button>
+    </div></div>
+
+    <div class="card"><div class="card-header"><h2>监控市场</h2><button class="btn btn-primary btn-sm" onclick="openModal('addMarket')">+ 添加市场</button></div><div class="card-body"><div class="table-wrap"><table><thead><tr><th>问题/话题</th><th>YES</th><th>NO</th><th>我的判断</th><th>操作</th></tr></thead><tbody id="marketsTable"></tbody></table></div><div id="noMarkets" style="text-align:center;padding:20px;color:#94a3b8">暂无监控市场</div></div></div>
     <div class="card"><div class="card-header"><h2>套利机会</h2><span id="lastScan" style="font-size:12px;color:#94a3b8">等待扫描...</span></div><div class="card-body" id="oppsList"><div style="text-align:center;padding:20px;color:#94a3b8">启动后自动扫描</div></div></div>
     <div class="card"><div class="card-header"><h2>套利分组</h2><button class="btn btn-primary btn-sm" onclick="openModal('addGroup')">+ 创建分组</button></div><div class="card-body"><div class="table-wrap"><table><thead><tr><th>名称</th><th>策略</th><th>市场数</th><th>操作</th></tr></thead><tbody id="groupsTable"></tbody></table></div><div id="noGroups" style="text-align:center;padding:20px;color:#94a3b8">暂无分组</div></div></div>
     <div class="card"><div class="card-header"><h2>风险控制</h2><button class="btn btn-ghost btn-sm" onclick="saveRisk()">保存设置</button></div><div class="card-body"><div class="form-row"><div class="form-group"><label>最大持仓 (USD)</label><input type="number" class="form-control" id="riskMaxPosition" value="100"></div><div class="form-group"><label>日亏损限额 (USD)</label><input type="number" class="form-control" id="riskDailyLoss" value="50"></div></div><div class="form-row"><div class="form-group"><label>单笔交易上限 (USD)</label><input type="number" class="form-control" id="riskMaxTrade" value="20"></div><div class="form-group"><label>最小套利价差</label><input type="number" class="form-control" id="riskMinSpread" value="0.02" step="0.005"></div></div></div></div>
@@ -47,6 +62,7 @@
         <input type="text" class="form-control" id="marketUrl" placeholder="https://polymarket.com/event/..." style="margin-bottom:8px">
         <button class="btn btn-primary" onclick="resolveMarketUrl()" id="btnResolve" style="width:100%">解析市场</button>
     </div>
+    <div class="form-row" style="margin-top:8px"><div class="form-group"><label>话题分类</label><select class="form-control" id="marketTopic"><option value="politics">政治</option><option value="geopolitics">地缘冲突</option><option value="crypto">数字货币</option><option value="economy">经济</option><option value="weather">天气</option><option value="sports">体育</option><option value="other">其他</option></select></div><div class="form-group"><label>我的判断 (YES概率)</label><input type="range" min="0" max="100" value="50" class="form-control" id="marketConviction" style="padding:4px" oninput="document.getElementById('convLabel').textContent=this.value+'%'"><span id="convLabel" style="font-size:12px;color:#94a3b8">50%</span></div></div>
     <div id="resolveStatus" style="text-align:center;padding:8px;border-radius:6px;display:none;margin-bottom:12px"></div>
     <div id="resolvedMarkets" style="max-height:300px;overflow-y:auto"></div>
     <hr style="border-color:#334155;margin:14px 0">
@@ -108,7 +124,8 @@ function updateBotState(s) { if (s.running !== undefined) botState.running = s.r
 function updatePnl(id, v) { const e = document.getElementById(id); e.textContent = '$' + v.toFixed(2); e.className = 'stat-value ' + (v >= 0 ? 'stat-positive' : 'stat-negative'); }
 
 // Markets
-async function loadMarkets() { markets = await api('/markets'); const t = document.getElementById('marketsTable'), e = document.getElementById('noMarkets'); if (!markets.length) { t.innerHTML = ''; e.style.display = ''; document.getElementById('statMarkets').textContent = '0'; return; } e.style.display = 'none'; document.getElementById('statMarkets').textContent = markets.length; t.innerHTML = markets.map(m => '<tr><td title="' + m.condition_id + '">' + m.question + '</td><td>-</td><td>-</td><td>-</td><td><button class="btn btn-danger btn-sm" onclick="removeMarket(\'' + m.condition_id + '\')">删除</button></td></tr>').join(''); }
+async function loadMarkets() { markets = await api('/markets'); const t = document.getElementById('marketsTable'), e = document.getElementById('noMarkets'); if (!markets.length) { t.innerHTML = ''; e.style.display = ''; document.getElementById('statMarkets').textContent = '0'; return; } e.style.display = 'none'; document.getElementById('statMarkets').textContent = markets.length;
+  t.innerHTML = markets.map(m => '<tr><td title="' + m.condition_id + '" style="max-width:200px">' + m.question + '<div style="font-size:11px;color:#64748b">' + (m.topic || '') + '</div></td><td>-</td><td>-</td><td><div style="display:flex;align-items:center;gap:4px"><input type="range" min="0" max="100" value="' + Math.round((m.user_conviction || 0.5) * 100) + '" style="width:60px" onchange="updateConviction(\'' + m.condition_id + '\',this.value)"><span style="font-size:11px;min-width:30px">' + Math.round((m.user_conviction || 0.5) * 100) + '%</span></div></td><td><button class="btn btn-danger btn-sm" onclick="removeMarket(\'' + m.condition_id + '\')">删除</button></td></tr>').join(''); }
 let _resolvedMarkets = [];
 async function resolveMarketUrl() {
   const url = document.getElementById('marketUrl').value.trim();
@@ -138,7 +155,9 @@ async function resolveMarketUrl() {
 async function addResolvedMarket(idx) {
   const m = _resolvedMarkets[idx];
   if (!m || !m.condition_id) { alert('缺少 Condition ID'); return; }
-  await api('/markets', 'POST', { condition_id: m.condition_id, question: m.question || '', token_yes: m.token_yes || null, token_no: m.token_no || null });
+  const topic = document.getElementById('marketTopic').value;
+  const conviction = parseInt((document.getElementById('marketConviction') as HTMLInputElement).value) / 100;
+  await api('/markets', 'POST', { condition_id: m.condition_id, question: m.question || '', token_yes: m.token_yes || null, token_no: m.token_no || null, topic, user_conviction: conviction });
   var btn = document.querySelectorAll('#resolvedMarkets .btn-success')[idx];
   if (btn) { btn.textContent = '已添加'; btn.disabled = true; btn.className = 'btn btn-ghost btn-sm'; }
   loadMarkets(); addLog('已添加: ' + m.question, 'info');
@@ -180,8 +199,32 @@ async function testConnection() { const btn = document.getElementById('btnTestCo
 async function checkApi() { try { const r = await api('/connection/test'); const d = document.getElementById('apiDot'), s = document.getElementById('apiStatus'); if (r.auth_ok) { d.style.background = '#22c55e'; s.textContent = 'API 已连接'; s.style.color = '#22c55e'; } else if (r.api_configured) { d.style.background = '#f59e0b'; s.textContent = 'API 认证失败'; s.style.color = '#f59e0b'; } else { d.style.background = '#ef4444'; s.textContent = '未配置API'; s.style.color = '#ef4444'; } } catch { document.getElementById('apiDot').style.background = '#ef4444'; document.getElementById('apiStatus').textContent = '服务不可用'; } }
 
 // Status & Init
+// Mode & Strategy
+async function setMode(m) {
+  await api('/settings', 'PUT', { settings: { TRADING_MODE: m } });
+  document.getElementById('modePaper').style.background = m === 'paper' ? '#f59e0b' : '#334155';
+  document.getElementById('modePaper').style.color = m === 'paper' ? '#000' : '#94a3b8';
+  document.getElementById('modeReal').style.background = m === 'real' ? '#ef4444' : '#334155';
+  document.getElementById('modeReal').style.color = m === 'real' ? '#fff' : '#94a3b8';
+  addLog('模式切换: ' + (m === 'paper' ? '模拟交易' : '真实交易'), m === 'real' ? 'error' : 'info');
+  if (m === 'real' && !confirm('确认切换到真实交易模式？将使用真金白银！')) { setMode('paper'); return; }
+}
+async function saveStrategies() {
+  const checked = Array.from(document.querySelectorAll('.strat-cb:checked')).map((c: any) => c.value);
+  await api('/settings', 'PUT', { settings: { ENABLED_STRATEGIES: checked.join(',') } });
+  addLog('策略更新: ' + checked.join(', '), 'info');
+}
+async function loadModeAndStrategies() {
+  try {
+    const s = await api('/bot/status');
+    if (s.mode) { document.getElementById('modePaper').style.background = s.mode === 'paper' ? '#f59e0b' : '#334155'; document.getElementById('modePaper').style.color = s.mode === 'paper' ? '#000' : '#94a3b8'; document.getElementById('modeReal').style.background = s.mode === 'real' ? '#ef4444' : '#334155'; document.getElementById('modeReal').style.color = s.mode === 'real' ? '#fff' : '#94a3b8'; }
+    if (s.strategies) { document.querySelectorAll('.strat-cb').forEach((c: any) => { c.checked = s.strategies.includes(c.value); }); }
+  } catch {}
+}
+async function updateConviction(cid: string, val: string) { await api('/markets/' + cid + '/conviction', 'PUT', { conviction: parseInt(val) / 100 }); }
+
 async function loadStatus() { try { const s = await api('/bot/status'); updateBotState(s); if (!s.trading_ready) addLog('凭证未配置 - 点击齿轮查看', 'error'); } catch { addLog('后端连接失败', 'error'); } }
-async function init() { await loadStatus(); await loadMarkets(); await loadGroups(); await loadRisk(); await loadTrades(); await loadAlerts(); checkApi(); setInterval(loadMarkets, 30000); setInterval(loadTrades, 30000); setInterval(loadAlerts, 15000); setInterval(checkApi, 60000); }
+async function init() { await loadStatus(); await loadMarkets(); await loadGroups(); await loadRisk(); await loadTrades(); await loadAlerts(); await loadModeAndStrategies(); checkApi(); setInterval(loadMarkets, 30000); setInterval(loadTrades, 30000); setInterval(loadAlerts, 15000); setInterval(checkApi, 60000); }
 init();
 </script>
 </body>
