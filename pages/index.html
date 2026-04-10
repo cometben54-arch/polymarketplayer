@@ -8,23 +8,12 @@
 </head>
 <body>
 
-<!-- Setup Screen -->
-<div id="setupScreen" style="position:fixed;inset:0;background:var(--bg);z-index:200;display:none;justify-content:center;align-items:center">
-    <div style="background:var(--bg2);padding:40px;border-radius:16px;max-width:450px;text-align:center;border:1px solid var(--border)">
-        <h2 style="margin-bottom:8px">Polymarket 套利机器人</h2>
-        <p style="color:#94a3b8;margin:16px 0">首次使用请输入后端服务器地址</p>
-        <input type="text" id="setupUrl" class="form-control" placeholder="http://你的IP:8888" style="margin-bottom:16px;text-align:center">
-        <button class="btn btn-primary" onclick="saveSetupUrl()" style="width:100%">连接服务器</button>
-        <p style="color:#64748b;font-size:12px;margin-top:12px">后端运行 python run.py 后的地址</p>
-    </div>
-</div>
-
 <!-- Header -->
 <div class="header">
-    <h1><span>&#9670;</span> Polymarket 套利机器人 <span style="font-size:10px;color:#64748b;font-weight:400;margin-left:8px">v1.6.0 | 2026-04-10</span></h1>
+    <h1><span>&#9670;</span> Polymarket 套利机器人 <span style="font-size:10px;color:#64748b;font-weight:400;margin-left:8px">v1.8.0 | 2026-04-10</span></h1>
     <div class="header-controls">
-        <span class="ws-dot ws-disconnected" id="wsDot"></span>
-        <span id="wsStatus" style="font-size:12px;color:#94a3b8">未连接</span>
+        <span id="apiDot" style="width:8px;height:8px;border-radius:50%;display:inline-block;background:#ef4444"></span>
+        <span id="apiStatus" style="font-size:12px;color:#94a3b8">检测中...</span>
         <button class="btn btn-ghost btn-sm" onclick="promptSettingsPassword()" style="font-size:18px;margin-left:8px" title="设置">&#9881;</button>
         <span class="status-badge status-stopped" id="botStatus">已停止</span>
         <button class="btn btn-success" id="btnStart" onclick="botControl('start')">启动</button>
@@ -59,7 +48,6 @@
     <div class="form-row"><div class="form-group"><label>YES Token</label><input type="text" class="form-control" id="marketTokenYes"></div><div class="form-group"><label>NO Token</label><input type="text" class="form-control" id="marketTokenNo"></div></div>
     <div style="display:flex;gap:8px;justify-content:flex-end"><button class="btn btn-ghost" onclick="closeModal('addMarket')">取消</button><button class="btn btn-primary" onclick="addMarket()">添加</button></div>
 </div></div>
-
 <!-- Add Group Modal -->
 <div class="modal-backdrop" id="modalAddGroup"><div class="modal"><h3>创建套利分组</h3>
     <div class="form-group"><label>名称</label><input type="text" class="form-control" id="groupName"></div>
@@ -68,7 +56,6 @@
     <div class="form-group"><label>市场</label><div id="groupMarketsList" style="max-height:150px;overflow-y:auto"></div></div>
     <div style="display:flex;gap:8px;justify-content:flex-end"><button class="btn btn-ghost" onclick="closeModal('addGroup')">取消</button><button class="btn btn-primary" onclick="addGroup()">创建</button></div>
 </div></div>
-
 <!-- Password Modal -->
 <div class="modal-backdrop" id="modalPassword"><div class="modal" style="max-width:380px;text-align:center">
     <h3>&#128274; 输入管理密码</h3>
@@ -76,73 +63,75 @@
     <div id="pwdError" style="color:#ef4444;font-size:13px;margin-bottom:10px;display:none">密码错误</div>
     <div style="display:flex;gap:8px;justify-content:center"><button class="btn btn-ghost" onclick="closeModal('password')">取消</button><button class="btn btn-primary" onclick="checkSettingsPassword()">确认</button></div>
 </div></div>
-
 <!-- Settings Modal -->
 <div class="modal-backdrop" id="modalSettings"><div class="modal" style="max-width:640px;max-height:85vh;overflow-y:auto">
     <h3>&#9881; 系统设置</h3>
-    <div style="background:#1e293b;border-radius:8px;padding:14px;margin-bottom:16px"><h4 style="font-size:14px;margin-bottom:10px;color:#60a5fa">后端服务器</h4>
-        <div class="form-group"><label>服务器地址</label><input type="text" class="form-control" id="cfgBackendUrl" placeholder="http://你的IP:8888"><small style="color:#94a3b8;font-size:11px">运行 python run.py 后的地址</small></div></div>
-    <div style="background:#1e293b;border-radius:8px;padding:14px;margin-bottom:16px"><h4 style="font-size:14px;margin-bottom:10px;color:#60a5fa">CLOB API 凭证</h4>
-        <div class="form-group"><label>API Key</label><input type="password" class="form-control setting-input" data-key="POLYMARKET_API_KEY"></div>
-        <div class="form-group"><label>API Secret</label><input type="password" class="form-control setting-input" data-key="POLYMARKET_API_SECRET"></div>
-        <div class="form-group"><label>Passphrase</label><input type="password" class="form-control setting-input" data-key="POLYMARKET_API_PASSPHRASE"></div></div>
+    <div style="background:#1e293b;border-radius:8px;padding:14px;margin-bottom:16px"><h4 style="font-size:14px;margin-bottom:10px;color:#60a5fa">CLOB API 凭证</h4><small style="color:#94a3b8;font-size:11px;display:block;margin-bottom:8px">密钥通过 Cloudflare 环境变量配置，此处仅显示状态</small>
+        <div class="form-group"><label>API Key</label><input type="text" class="form-control setting-input" data-key="POLYMARKET_API_KEY" readonly style="opacity:0.7"></div>
+        <div class="form-group"><label>API Secret</label><input type="text" class="form-control setting-input" data-key="POLYMARKET_API_SECRET" readonly style="opacity:0.7"></div>
+        <div class="form-group"><label>Passphrase</label><input type="text" class="form-control setting-input" data-key="POLYMARKET_API_PASSPHRASE" readonly style="opacity:0.7"></div></div>
     <div style="background:#1e293b;border-radius:8px;padding:14px;margin-bottom:16px"><h4 style="font-size:14px;margin-bottom:10px;color:#60a5fa">钱包配置</h4>
-        <div class="form-group"><label>Private Key</label><input type="password" class="form-control setting-input" data-key="POLYMARKET_PRIVATE_KEY" placeholder="0x..."></div>
-        <div class="form-group"><label>钱包地址</label><input type="text" class="form-control setting-input" data-key="POLYMARKET_FUNDER_ADDRESS" placeholder="0x..."></div>
-        <div class="form-group"><label>签名类型</label><select class="form-control setting-input" data-key="POLYMARKET_SIGNATURE_TYPE"><option value="0">0-EOA</option><option value="1">1-Email</option><option value="2">2-合约</option></select></div></div>
-    <div style="background:#1e293b;border-radius:8px;padding:14px;margin-bottom:16px"><h4 style="font-size:14px;margin-bottom:10px;color:#60a5fa">API 端点</h4>
-        <div class="form-group"><label>CLOB API</label><input type="text" class="form-control setting-input" data-key="POLYMARKET_API_URL" placeholder="https://clob.polymarket.com"></div>
-        <div class="form-group"><label>Gamma API</label><input type="text" class="form-control setting-input" data-key="GAMMA_API_URL" placeholder="https://gamma-api.polymarket.com"></div>
-        <div class="form-group"><label>Data API</label><input type="text" class="form-control setting-input" data-key="DATA_API_URL" placeholder="https://data-api.polymarket.com"></div></div>
-    <div style="background:#1e293b;border-radius:8px;padding:14px;margin-bottom:16px"><h4 style="font-size:14px;margin-bottom:10px;color:#60a5fa">风险控制</h4>
+        <div class="form-group"><label>Private Key</label><input type="text" class="form-control setting-input" data-key="POLYMARKET_PRIVATE_KEY" readonly style="opacity:0.7"></div>
+        <div class="form-group"><label>钱包地址</label><input type="text" class="form-control setting-input" data-key="POLYMARKET_FUNDER_ADDRESS" readonly style="opacity:0.7"></div></div>
+    <div style="background:#1e293b;border-radius:8px;padding:14px;margin-bottom:16px"><h4 style="font-size:14px;margin-bottom:10px;color:#60a5fa">风险控制 (可修改)</h4>
         <div class="form-row"><div class="form-group"><label>最大持仓</label><input type="number" class="form-control setting-input" data-key="MAX_POSITION_SIZE_USD"></div><div class="form-group"><label>日亏损限额</label><input type="number" class="form-control setting-input" data-key="DAILY_LOSS_LIMIT_USD"></div></div>
         <div class="form-row"><div class="form-group"><label>单笔上限</label><input type="number" class="form-control setting-input" data-key="MAX_SINGLE_TRADE_USD"></div><div class="form-group"><label>最小价差</label><input type="number" class="form-control setting-input" data-key="MIN_ARBITRAGE_SPREAD" step="0.005"></div></div></div>
-    <div style="background:#1e293b;border-radius:8px;padding:14px;margin-bottom:16px"><h4 style="font-size:14px;margin-bottom:10px;color:#60a5fa">服务器</h4>
-        <div class="form-row"><div class="form-group"><label>扫描间隔(秒)</label><input type="number" class="form-control setting-input" data-key="POLL_INTERVAL"></div><div class="form-group"><label>端口</label><input type="number" class="form-control setting-input" data-key="PORT"></div></div></div>
     <div id="settingsMsg" style="text-align:center;padding:8px;margin-bottom:10px;border-radius:6px;display:none"></div>
     <div style="display:flex;gap:8px;justify-content:space-between"><button class="btn btn-primary" onclick="testConnection()" id="btnTestConn">测试连接</button><div style="display:flex;gap:8px"><button class="btn btn-ghost" onclick="closeModal('settings')">取消</button><button class="btn btn-success" onclick="saveAllSettings()">保存设置</button></div></div>
 </div></div>
 
 <script>
-let API_BASE = localStorage.getItem('API_BASE') || '';
-function getWsUrl() { return (API_BASE || location.origin).replace(/^http/, 'ws') + '/ws'; }
-function showSetup() { document.getElementById('setupScreen').style.display = 'flex'; }
-function saveSetupUrl() { const u = document.getElementById('setupUrl').value.trim().replace(/\/+$/, ''); if (!u) { alert('请输入地址'); return; } localStorage.setItem('API_BASE', u); API_BASE = u; document.getElementById('setupScreen').style.display = 'none'; init(); }
-let ws = null, botState = { running: false, paused: false }, markets = [], searchTimeout = null;
-async function api(p, m, b) { const o = { method: m || 'GET', headers: { 'Content-Type': 'application/json' } }; if (b) o.body = JSON.stringify(b); return (await fetch((API_BASE || '') + '/api' + p, o)).json(); }
-function connectWS() { ws = new WebSocket(getWsUrl()); ws.onopen = () => { document.getElementById('wsDot').className = 'ws-dot ws-connected'; document.getElementById('wsStatus').textContent = '已连接'; addLog('连接成功', 'info'); }; ws.onclose = () => { document.getElementById('wsDot').className = 'ws-dot ws-disconnected'; document.getElementById('wsStatus').textContent = '已断开'; setTimeout(connectWS, 3000); }; ws.onmessage = e => handleWSMessage(JSON.parse(e.data)); }
-function handleWSMessage(msg) { switch (msg.event) { case 'state': updateBotState(msg.data); break; case 'scan_complete': document.getElementById('lastScan').textContent = '扫描: ' + new Date().toLocaleTimeString(); document.getElementById('statOpps').textContent = msg.data.opportunities_found; renderOpportunities(msg.data.opportunities); addLog('扫描: ' + msg.data.markets_scanned + '市场, ' + msg.data.opportunities_found + '机会', 'info'); break; case 'trade_executed': addLog('交易: ' + (msg.data.success ? '成功' : '失败'), msg.data.success ? 'trade' : 'error'); loadTrades(); loadStatus(); break; case 'error': addLog('错误: ' + msg.data.message, 'error'); break; } }
+let botState = { running: false, paused: false }, markets = [], searchTimeout = null;
+async function api(p, m, b) { const o = { method: m || 'GET', headers: { 'Content-Type': 'application/json' } }; if (b) o.body = JSON.stringify(b); return (await fetch('/api' + p, o)).json(); }
+
+// Bot
 async function botControl(a) { await api('/bot/control', 'POST', { action: a }); await loadStatus(); }
 function updateBotState(s) { if (s.running !== undefined) botState.running = s.running; if (s.paused !== undefined) botState.paused = s.paused; if (s.daily_pnl !== undefined) updatePnl('statDailyPnl', s.daily_pnl); if (s.total_pnl !== undefined) updatePnl('statTotalPnl', s.total_pnl); const b = document.getElementById('botStatus'), s1 = document.getElementById('btnStart'), s2 = document.getElementById('btnPause'), s3 = document.getElementById('btnResume'), s4 = document.getElementById('btnStop'); if (!botState.running) { b.textContent = '已停止'; b.className = 'status-badge status-stopped'; s1.style.display = ''; s2.style.display = 'none'; s3.style.display = 'none'; s4.style.display = 'none'; } else if (botState.paused) { b.textContent = '已暂停'; b.className = 'status-badge status-paused'; s1.style.display = 'none'; s2.style.display = 'none'; s3.style.display = ''; s4.style.display = ''; } else { b.textContent = '运行中'; b.className = 'status-badge status-running'; s1.style.display = 'none'; s2.style.display = ''; s3.style.display = 'none'; s4.style.display = ''; } }
 function updatePnl(id, v) { const e = document.getElementById(id); e.textContent = '$' + v.toFixed(2); e.className = 'stat-value ' + (v >= 0 ? 'stat-positive' : 'stat-negative'); }
+
+// Markets
 async function loadMarkets() { markets = await api('/markets'); const t = document.getElementById('marketsTable'), e = document.getElementById('noMarkets'); if (!markets.length) { t.innerHTML = ''; e.style.display = ''; document.getElementById('statMarkets').textContent = '0'; return; } e.style.display = 'none'; document.getElementById('statMarkets').textContent = markets.length; t.innerHTML = markets.map(m => '<tr><td title="' + m.condition_id + '">' + m.question + '</td><td>-</td><td>-</td><td>-</td><td><button class="btn btn-danger btn-sm" onclick="removeMarket(\'' + m.condition_id + '\')">删除</button></td></tr>').join(''); }
 async function searchMarkets() { clearTimeout(searchTimeout); const q = document.getElementById('marketSearch').value; if (q.length < 2) return; searchTimeout = setTimeout(async () => { const r = await api('/markets/search?q=' + encodeURIComponent(q)); const c = document.getElementById('searchResults'); if (Array.isArray(r) && r.length) c.innerHTML = r.map(m => '<div style="padding:8px;border-bottom:1px solid #334155;cursor:pointer;font-size:13px" onclick="selectSR(\'' + (m.condition_id || '') + "','" + ((m.question || '').replace(/'/g, "\\'")) + "','" + (m.tokens?.[0]?.token_id || '') + "','" + (m.tokens?.[1]?.token_id || '') + "')\">" + (m.question || '?') + '</div>').join(''); else c.innerHTML = '<div style="padding:8px;color:#94a3b8">未找到</div>'; }, 500); }
 function selectSR(a, b, c, d) { document.getElementById('marketConditionId').value = a; document.getElementById('marketQuestion').value = b; document.getElementById('marketTokenYes').value = c; document.getElementById('marketTokenNo').value = d; }
 async function addMarket() { const c = document.getElementById('marketConditionId').value.trim(), q = document.getElementById('marketQuestion').value.trim(); if (!c || !q) { alert('请填写ID和问题'); return; } await api('/markets', 'POST', { condition_id: c, question: q, token_yes: document.getElementById('marketTokenYes').value.trim() || null, token_no: document.getElementById('marketTokenNo').value.trim() || null }); closeModal('addMarket'); loadMarkets(); }
 async function removeMarket(id) { if (!confirm('确定？')) return; await api('/markets/' + id, 'DELETE'); loadMarkets(); }
+
+// Groups
 async function loadGroups() { const g = await api('/groups'), t = document.getElementById('groupsTable'), e = document.getElementById('noGroups'); if (!g.length) { t.innerHTML = ''; e.style.display = ''; return; } e.style.display = 'none'; const sn = { complement: '互补', multi_outcome: '多结果', correlation: '相关性' }; t.innerHTML = g.map(x => '<tr><td>' + x.name + '</td><td>' + (sn[x.strategy] || x.strategy) + '</td><td>' + (x.market_ids || []).length + '</td><td><button class="btn btn-danger btn-sm" onclick="removeGroup(' + x.id + ')">删除</button></td></tr>').join(''); }
 async function addGroup() { const n = document.getElementById('groupName').value.trim(), d = document.getElementById('groupDesc').value.trim(), s = document.getElementById('groupStrategy').value, ids = Array.from(document.querySelectorAll('#groupMarketsList input:checked')).map(c => c.value); if (!n || ids.length < 2) { alert('名称+至少2市场'); return; } await api('/groups', 'POST', { name: n, description: d, market_ids: ids, strategy: s }); closeModal('addGroup'); loadGroups(); }
 async function removeGroup(id) { if (!confirm('确定？')) return; await api('/groups/' + id, 'DELETE'); loadGroups(); }
+
+// Risk
 async function loadRisk() { const r = await api('/risk'); document.getElementById('riskMaxPosition').value = r.max_position_size_usd; document.getElementById('riskDailyLoss').value = r.daily_loss_limit_usd; document.getElementById('riskMaxTrade').value = r.max_single_trade_usd; document.getElementById('riskMinSpread').value = r.min_arbitrage_spread; }
 async function saveRisk() { await api('/risk', 'PUT', { max_position_size_usd: +document.getElementById('riskMaxPosition').value, daily_loss_limit_usd: +document.getElementById('riskDailyLoss').value, max_single_trade_usd: +document.getElementById('riskMaxTrade').value, min_arbitrage_spread: +document.getElementById('riskMinSpread').value }); addLog('风险已更新', 'info'); }
+
+// Trades & Alerts
 async function loadTrades() { const t = await api('/trades?limit=30'), tb = document.getElementById('tradesTable'), e = document.getElementById('noTrades'); if (!t.length) { tb.innerHTML = ''; e.style.display = ''; return; } e.style.display = 'none'; tb.innerHTML = t.map(x => '<tr><td>' + new Date(x.created_at).toLocaleString() + '</td><td style="color:' + (x.side === 'BUY' ? '#22c55e' : '#ef4444') + '">' + x.side + '</td><td>$' + x.price.toFixed(3) + '</td><td>' + x.size.toFixed(2) + '</td><td>$' + x.amount_usd.toFixed(2) + '</td><td>' + x.status + '</td></tr>').join(''); }
 async function loadAlerts() { const a = await api('/alerts?limit=20'), c = document.getElementById('alertsList'); document.getElementById('alertCount').textContent = a.filter(x => !x.resolved).length + ' 条未解决'; if (!a.length) { c.innerHTML = '<div style="text-align:center;padding:20px;color:#94a3b8">暂无警报</div>'; return; } c.innerHTML = a.map(x => '<div class="alert-item alert-' + x.level + (x.resolved ? ' alert-resolved' : '') + '"><div><strong>' + x.level.toUpperCase() + '</strong> ' + x.message + '</div>' + (!x.resolved ? '<button class="btn btn-ghost btn-sm" onclick="resolveAlert(' + x.id + ')">解决</button>' : '') + '</div>').join(''); }
 async function resolveAlert(id) { await api('/alerts/' + id + '/resolve', 'POST'); loadAlerts(); }
 function renderOpportunities(opps) { const c = document.getElementById('oppsList'); if (!opps || !opps.length) { c.innerHTML = '<div style="text-align:center;padding:20px;color:#94a3b8">暂未发现套利机会</div>'; return; } c.innerHTML = opps.map(o => '<div class="opp-card"><div style="display:flex;justify-content:space-between"><div><div class="opp-spread">' + (o.spread * 100).toFixed(2) + '%</div><div class="opp-detail">' + o.strategy + ' | ' + o.legs + '腿</div></div><div style="color:#22c55e;font-weight:700">+$' + o.expected_profit.toFixed(2) + '</div></div></div>').join(''); }
+
+// Log
 function addLog(m, t) { const f = document.getElementById('logFeed'), d = document.createElement('div'); d.className = 'log-entry ' + (t || 'info'); d.innerHTML = '<span class="time">[' + new Date().toLocaleTimeString() + ']</span> ' + m; f.appendChild(d); f.scrollTop = f.scrollHeight; while (f.children.length > 200) f.removeChild(f.firstChild); }
 function clearLog() { document.getElementById('logFeed').innerHTML = ''; }
+
+// Modals
 function openModal(n) { document.getElementById('modal' + n.charAt(0).toUpperCase() + n.slice(1)).classList.add('active'); if (n === 'addGroup') { const c = document.getElementById('groupMarketsList'); c.innerHTML = markets.map(m => '<label style="display:block;padding:4px 0;font-size:13px"><input type="checkbox" value="' + m.condition_id + '" style="margin-right:8px">' + m.question + '</label>').join('') || '<div style="color:#94a3b8">请先添加市场</div>'; } }
 function closeModal(n) { document.getElementById('modal' + n.charAt(0).toUpperCase() + n.slice(1)).classList.remove('active'); }
 
-// Password-protected settings
+// Password settings
 function promptSettingsPassword() { document.getElementById('settingsPwd').value = ''; document.getElementById('pwdError').style.display = 'none'; openModal('password'); setTimeout(() => document.getElementById('settingsPwd').focus(), 100); }
-function checkSettingsPassword() { if (document.getElementById('settingsPwd').value === 'W@ng2BO') { closeModal('password'); openModal('settings'); document.getElementById('cfgBackendUrl').value = API_BASE || ''; loadSettingsForm(); } else { document.getElementById('pwdError').style.display = ''; } }
-async function loadSettingsForm() { try { const d = await api('/settings'); document.querySelectorAll('.setting-input').forEach(el => { const k = el.dataset.key; if (!d[k]) return; el.tagName === 'SELECT' ? el.value = d[k].value || '0' : el.value = d[k].value || ''; if (el.type === 'password') el.style.borderColor = d[k].is_set ? '#22c55e' : '#ef4444'; }); } catch (e) { addLog('加载设置失败', 'error'); } }
-async function saveAllSettings() { const msg = document.getElementById('settingsMsg'); const bu = document.getElementById('cfgBackendUrl').value.trim().replace(/\/+$/, ''); if (bu !== API_BASE) { localStorage.setItem('API_BASE', bu); API_BASE = bu; } const s = {}; document.querySelectorAll('.setting-input').forEach(el => s[el.dataset.key] = el.value); try { await api('/settings', 'PUT', { settings: s }); msg.style.display = ''; msg.style.background = '#065f46'; msg.style.color = '#6ee7b7'; msg.textContent = '已保存！'; addLog('设置已更新', 'info'); setTimeout(() => msg.style.display = 'none', 3000); } catch (e) { msg.style.display = ''; msg.style.background = '#7f1d1d'; msg.style.color = '#fca5a5'; msg.textContent = '失败: ' + e.message; } }
-async function testConnection() { const btn = document.getElementById('btnTestConn'), msg = document.getElementById('settingsMsg'); btn.disabled = true; btn.textContent = '测试中...'; msg.style.display = ''; msg.style.background = '#1e3a5f'; msg.style.color = '#93c5fd'; msg.textContent = '测试中...'; try { const r = await api('/connection/test'); msg.style.background = r.auth_ok ? '#065f46' : r.clob_reachable ? '#78350f' : '#7f1d1d'; msg.style.color = r.auth_ok ? '#6ee7b7' : r.clob_reachable ? '#fcd34d' : '#fca5a5'; msg.textContent = r.message; } catch (e) { msg.style.background = '#7f1d1d'; msg.style.color = '#fca5a5'; msg.textContent = '失败: ' + e.message; } btn.disabled = false; btn.textContent = '测试连接'; }
+function checkSettingsPassword() { if (document.getElementById('settingsPwd').value === 'W@ng2BO') { closeModal('password'); openModal('settings'); loadSettingsForm(); } else { document.getElementById('pwdError').style.display = ''; } }
+async function loadSettingsForm() { try { const d = await api('/settings'); document.querySelectorAll('.setting-input').forEach(el => { const k = el.dataset.key; if (!d[k]) return; el.value = d[k].value || ''; if (el.readOnly) el.style.borderColor = d[k].is_set ? '#22c55e' : '#ef4444'; }); } catch {} }
+async function saveAllSettings() { const msg = document.getElementById('settingsMsg'), s = {}; document.querySelectorAll('.setting-input:not([readonly])').forEach(el => s[el.dataset.key] = el.value); try { await api('/settings', 'PUT', { settings: s }); msg.style.display = ''; msg.style.background = '#065f46'; msg.style.color = '#6ee7b7'; msg.textContent = '已保存！'; addLog('设置已更新', 'info'); setTimeout(() => msg.style.display = 'none', 3000); } catch (e) { msg.style.display = ''; msg.style.background = '#7f1d1d'; msg.style.color = '#fca5a5'; msg.textContent = '失败'; } }
+async function testConnection() { const btn = document.getElementById('btnTestConn'), msg = document.getElementById('settingsMsg'); btn.disabled = true; btn.textContent = '测试中...'; msg.style.display = ''; msg.style.background = '#1e3a5f'; msg.style.color = '#93c5fd'; msg.textContent = '测试中...'; try { const r = await api('/connection/test'); msg.style.background = r.auth_ok ? '#065f46' : r.clob_reachable ? '#78350f' : '#7f1d1d'; msg.style.color = r.auth_ok ? '#6ee7b7' : r.clob_reachable ? '#fcd34d' : '#fca5a5'; msg.textContent = r.message; } catch (e) { msg.style.background = '#7f1d1d'; msg.style.color = '#fca5a5'; msg.textContent = '失败'; } btn.disabled = false; btn.textContent = '测试连接'; }
 
-async function loadStatus() { const s = await api('/bot/status'); updateBotState({ running: s.running, paused: s.paused, daily_pnl: s.daily_pnl, total_pnl: s.total_pnl }); if (!s.trading_ready) addLog('凭证未配置 - 点击齿轮设置', 'error'); }
-async function init() { if (!API_BASE) { try { await fetch('/api/bot/status'); } catch { showSetup(); return; } } await loadStatus(); await loadMarkets(); await loadGroups(); await loadRisk(); await loadTrades(); await loadAlerts(); connectWS(); setInterval(loadMarkets, 30000); setInterval(loadTrades, 30000); setInterval(loadAlerts, 15000); }
+// API connection check
+async function checkApi() { try { const r = await api('/connection/test'); const d = document.getElementById('apiDot'), s = document.getElementById('apiStatus'); if (r.auth_ok) { d.style.background = '#22c55e'; s.textContent = 'API 已连接'; s.style.color = '#22c55e'; } else if (r.api_configured) { d.style.background = '#f59e0b'; s.textContent = 'API 认证失败'; s.style.color = '#f59e0b'; } else { d.style.background = '#ef4444'; s.textContent = '未配置API'; s.style.color = '#ef4444'; } } catch { document.getElementById('apiDot').style.background = '#ef4444'; document.getElementById('apiStatus').textContent = '服务不可用'; } }
+
+// Status & Init
+async function loadStatus() { try { const s = await api('/bot/status'); updateBotState(s); if (!s.trading_ready) addLog('凭证未配置 - 点击齿轮查看', 'error'); } catch { addLog('后端连接失败', 'error'); } }
+async function init() { await loadStatus(); await loadMarkets(); await loadGroups(); await loadRisk(); await loadTrades(); await loadAlerts(); checkApi(); setInterval(loadMarkets, 30000); setInterval(loadTrades, 30000); setInterval(loadAlerts, 15000); setInterval(checkApi, 60000); }
 init();
 </script>
 </body>

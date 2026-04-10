@@ -1,9 +1,8 @@
 {
-  "name": "polymarket-bot-pages",
-  "version": "1.0.0",
+  "name": "polymarket-bot",
+  "version": "1.8.0",
   "private": true,
-  "scripts": {
-    "deploy": "npx wrangler pages deploy pages --project-name=polymarket-bot",
-    "dev": "npx wrangler pages dev pages --port 3000"
+  "dependencies": {
+    "hono": "^4.6.0"
   }
 }
