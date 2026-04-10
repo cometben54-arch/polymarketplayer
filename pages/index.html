@@ -156,7 +156,7 @@ async function addResolvedMarket(idx) {
   const m = _resolvedMarkets[idx];
   if (!m || !m.condition_id) { alert('缺少 Condition ID'); return; }
   const topic = document.getElementById('marketTopic').value;
-  const conviction = parseInt((document.getElementById('marketConviction') as HTMLInputElement).value) / 100;
+  const conviction = parseInt(document.getElementById('marketConviction').value) / 100;
   await api('/markets', 'POST', { condition_id: m.condition_id, question: m.question || '', token_yes: m.token_yes || null, token_no: m.token_no || null, topic, user_conviction: conviction });
   var btn = document.querySelectorAll('#resolvedMarkets .btn-success')[idx];
   if (btn) { btn.textContent = '已添加'; btn.disabled = true; btn.className = 'btn btn-ghost btn-sm'; }
