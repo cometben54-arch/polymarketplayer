@@ -5,7 +5,7 @@ compatibility_date = "2024-12-01"
 [[d1_databases]]
 binding = "DB"
 database_name = "polymarket-bot-db"
-database_id = "placeholder-will-be-replaced-after-create"
+database_id = "2e08d2ca-e327-4ccd-8920-357dc60e28c4"
 
 [triggers]
 crons = ["*/2 * * * *"]
