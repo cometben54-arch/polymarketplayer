@@ -1,8 +1,9 @@
 {
   "name": "polymarket-bot",
-  "version": "1.8.0",
+  "version": "1.8.4",
   "private": true,
   "dependencies": {
-    "hono": "^4.6.0"
+    "hono": "^4.6.0",
+    "viem": "^2.21.0"
   }
 }

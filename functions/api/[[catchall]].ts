@@ -6,6 +6,7 @@
 import { Hono } from 'hono';
 import { handle } from 'hono/cloudflare-pages';
 import { cors } from 'hono/cors';
+import { privateKeyToAddress } from 'viem/accounts';
 
 // --- Types ---
 interface Env {
@@ -38,13 +39,24 @@ async function hmacSign(secret: string, msg: string): Promise<string> {
   return b64.replace(/\+/g, '-').replace(/\//g, '_');
 }
 
+function getSignerAddress(env: Env): string {
+  // Derive the signer address from private key (this is the address the API key is bound to)
+  if (!env.POLYMARKET_PRIVATE_KEY) return env.POLYMARKET_FUNDER_ADDRESS || '';
+  try {
+    return privateKeyToAddress(env.POLYMARKET_PRIVATE_KEY as `0x${string}`);
+  } catch {
+    return env.POLYMARKET_FUNDER_ADDRESS || '';
+  }
+}
+
 async function authHeaders(env: Env, method: string, path: string, body = ''): Promise<Record<string, string>> {
   if (!env.POLYMARKET_API_KEY || !env.POLYMARKET_API_SECRET) return {};
   const ts = Math.floor(Date.now() / 1000).toString();
   const message = ts + method.toUpperCase() + path + (body || '');
   const sig = await hmacSign(env.POLYMARKET_API_SECRET, message);
+  const address = getSignerAddress(env);
   return {
-    'POLY_ADDRESS': env.POLYMARKET_FUNDER_ADDRESS || '',
+    'POLY_ADDRESS': address,
     'POLY_API_KEY': env.POLYMARKET_API_KEY,
     'POLY_SIGNATURE': sig,
     'POLY_TIMESTAMP': ts,
@@ -219,6 +231,13 @@ app.get('/debug/env', async c => {
     status[k] = { exists: v !== undefined && v !== null && v !== '', type: typeof v, length: v ? String(v).length : 0 };
   }
   status['DB_BOUND'] = { exists: !!c.env.DB };
+  // Show derived signer address vs funder address
+  try {
+    const signer = getSignerAddress(c.env);
+    status['DERIVED_SIGNER_ADDRESS'] = signer;
+    status['FUNDER_ADDRESS'] = c.env.POLYMARKET_FUNDER_ADDRESS || '';
+    status['ADDRESSES_MATCH'] = signer.toLowerCase() === (c.env.POLYMARKET_FUNDER_ADDRESS || '').toLowerCase();
+  } catch (e: any) { status['ADDRESS_ERROR'] = e.message; }
   return c.json(status);
 });
 
