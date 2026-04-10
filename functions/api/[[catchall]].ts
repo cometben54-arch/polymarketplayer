@@ -288,6 +288,115 @@ async function aiReview(env: Env, db: D1Database, reviewType: string): Promise<s
   }
 }
 
+// --- AI Advisory: deep analysis with market data + context ---
+async function generateAdvisory(env: Env, db: D1Database): Promise<string> {
+  const aiKey = await getSetting(db, 'AI_API_KEY');
+  const aiProvider = await getSetting(db, 'AI_PROVIDER', 'openai');
+  const aiModel = await getSetting(db, 'AI_MODEL', 'gpt-4o');
+  const aiBaseUrl = await getSetting(db, 'AI_BASE_URL', 'https://api.openai.com/v1');
+  if (!aiKey) return 'AI API Key 未配置，请在齿轮设置中填入。';
+
+  // 1. Gather all watched markets
+  const markets = (await db.prepare('SELECT * FROM watched_markets WHERE active=1').all()).results as any[];
+  if (!markets.length) return '暂无监控市场，请先添加市场。';
+
+  // 2. Get 24h price snapshots for each market
+  const marketData: any[] = [];
+  for (const m of markets) {
+    const snapshots = (await db.prepare("SELECT * FROM price_snapshots WHERE condition_id=? AND recorded_at > datetime('now','-1 day') ORDER BY recorded_at ASC").bind(m.condition_id).all()).results;
+    // Current price
+    let currentYes = null, currentNo = null;
+    if (m.token_yes) currentYes = await getMidpoint(env, m.token_yes);
+    if (m.token_no) currentNo = await getMidpoint(env, m.token_no);
+    marketData.push({
+      question: m.question, topic: m.topic || 'other', condition_id: m.condition_id,
+      user_conviction: m.user_conviction || 0.5,
+      current_yes: currentYes, current_no: currentNo,
+      snapshots_count: snapshots.length,
+      price_24h_ago: snapshots.length > 0 ? { yes: (snapshots[0] as any).price_yes, no: (snapshots[0] as any).price_no } : null,
+      price_latest: snapshots.length > 0 ? { yes: (snapshots[snapshots.length - 1] as any).price_yes, no: (snapshots[snapshots.length - 1] as any).price_no } : null,
+      price_change_yes: snapshots.length > 1 ? ((snapshots[snapshots.length - 1] as any).price_yes - (snapshots[0] as any).price_yes) : null,
+    });
+  }
+
+  // 3. Get recent trades
+  const trades = (await db.prepare("SELECT * FROM trades WHERE created_at > datetime('now','-1 day') ORDER BY created_at DESC LIMIT 30").all()).results;
+
+  // 4. Get P&L
+  const pnl = { daily: await getState(db, 'daily_pnl'), total: await getState(db, 'total_pnl') };
+
+  // 5. Build prompt
+  const prompt = `你是一位专业的预测市场投资顾问，精通 Polymarket 套利策略。请基于以下数据，为用户提供明天的手动投资建议。
+
+## 监控中的市场及24小时数据变化
+${marketData.map((m, i) => `
+### ${i + 1}. ${m.question}
+- 话题: ${m.topic}
+- 用户判断 YES 概率: ${Math.round(m.user_conviction * 100)}%
+- 当前价格: YES=${m.current_yes ?? '无'}, NO=${m.current_no ?? '无'}
+- 24h前价格: YES=${m.price_24h_ago?.yes ?? '无'}, NO=${m.price_24h_ago?.no ?? '无'}
+- 24h变化: YES ${m.price_change_yes !== null ? (m.price_change_yes > 0 ? '+' : '') + (m.price_change_yes * 100).toFixed(1) + '%' : '无数据'}
+- 数据点数: ${m.snapshots_count}
+`).join('')}
+
+## 今日交易记录
+${trades.length > 0 ? trades.map((t: any) => `- ${t.side} ${t.strategy || ''} $${t.amount_usd} (${t.mode}) ${t.status}`).join('\n') : '今日暂无交易'}
+
+## 盈亏
+- 日盈亏: $${pnl.daily}
+- 总盈亏: $${pnl.total}
+
+## 请分析并给出建议
+
+请用中文回答，格式如下：
+
+### 📊 市场概况
+（简要总结当前各市场态势和24h变化趋势）
+
+### 🔥 重点关注
+（哪些市场出现了显著价格波动或异常）
+
+### 💡 投资建议
+对每个市场给出具体建议：
+- 建议操作（买YES/买NO/持有观望/卖出）
+- 建议仓位比例
+- 理由
+
+### ⚠️ 风险提示
+（主要风险因素）
+
+### 📈 策略建议
+（综合策略建议，考虑用户的判断倾向和市场数据的偏差）
+
+请务必结合用户的判断概率和市场实际价格的偏差来给出建议。当用户判断与市场价格偏差超过15%时，重点提示。`;
+
+  try {
+    let apiUrl = aiBaseUrl + '/chat/completions';
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+
+    if (aiProvider === 'anthropic') {
+      apiUrl = (aiBaseUrl || 'https://api.anthropic.com') + '/v1/messages';
+      headers['x-api-key'] = aiKey;
+      headers['anthropic-version'] = '2023-06-01';
+      const res = await fetch(apiUrl, { method: 'POST', headers, body: JSON.stringify({ model: aiModel, max_tokens: 2000, messages: [{ role: 'user', content: prompt }] }) });
+      const data: any = await res.json();
+      const content = data.content?.[0]?.text || JSON.stringify(data);
+      await db.prepare('INSERT INTO ai_reviews(review_type,content) VALUES(?,?)').bind('advisory', content).run();
+      return content;
+    }
+
+    // OpenAI compatible
+    headers['Authorization'] = `Bearer ${aiKey}`;
+    const res = await fetch(apiUrl, { method: 'POST', headers, body: JSON.stringify({ model: aiModel, messages: [{ role: 'system', content: '你是一位专业的 Polymarket 预测市场投资顾问。' }, { role: 'user', content: prompt }], max_tokens: 2000 }) });
+    const data: any = await res.json();
+    const content = data.choices?.[0]?.message?.content || JSON.stringify(data);
+    await db.prepare('INSERT INTO ai_reviews(review_type,content) VALUES(?,?)').bind('advisory', content).run();
+    return content;
+  } catch (e: any) {
+    return 'AI 分析失败: ' + e.message;
+  }
+}
+
 // =============================================
 // HONO APP + ROUTES
 // =============================================
@@ -391,6 +500,16 @@ app.put('/settings', async c => {
 app.post('/scan', async c => c.json(await runScan(c.env)));
 app.post('/ai-review', async c => { const { type } = await c.req.json<{ type: string }>(); return c.json({ review: await aiReview(c.env, c.env.DB, type || 'hourly') }); });
 app.get('/ai-reviews', async c => c.json((await c.env.DB.prepare('SELECT * FROM ai_reviews ORDER BY created_at DESC LIMIT 10').all()).results));
+
+// AI Advisory: daily investment advice based on 24h data + market context
+app.post('/ai-advisory', async c => {
+  const result = await generateAdvisory(c.env, c.env.DB);
+  return c.json({ advisory: result });
+});
+app.get('/ai-advisory/latest', async c => {
+  const r = await c.env.DB.prepare("SELECT * FROM ai_reviews WHERE review_type='advisory' ORDER BY created_at DESC LIMIT 1").first();
+  return c.json(r || { content: '暂无投资建议。系统将在每天凌晨2点自动生成。', created_at: '' });
+});
 
 // Debug
 app.get('/debug/env', async c => {

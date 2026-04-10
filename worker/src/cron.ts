@@ -6,6 +6,7 @@
  * - Every 2 minutes: POST /api/scan (arbitrage scanning)
  * - Every hour (minute 0): POST /api/ai-review { type: "hourly" }
  * - Daily at 1:00 AM UTC: POST /api/ai-review { type: "daily" }
+ * - Daily at 2:00 AM UTC: POST /api/ai-advisory (investment advice)
  */
 
 interface Env {
@@ -48,6 +49,16 @@ export default {
           .then(r => r.json())
           .then(d => console.log('Daily AI summary:', JSON.stringify(d).slice(0, 500)))
           .catch(e => console.error('Daily summary failed:', e.message))
+      );
+    }
+
+    // Daily at 2:00 AM UTC: AI investment advisory
+    if (cronPattern === '0 2 * * *') {
+      ctx.waitUntil(
+        fetch(`${baseUrl}/api/ai-advisory`, { method: 'POST', headers })
+          .then(r => r.json())
+          .then(d => console.log('Advisory generated:', JSON.stringify(d).slice(0, 500)))
+          .catch(e => console.error('Advisory failed:', e.message))
       );
     }
   },

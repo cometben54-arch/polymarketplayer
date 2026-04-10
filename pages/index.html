@@ -49,6 +49,21 @@
     <div class="card"><div class="card-header"><h2>套利机会</h2><span id="lastScan" style="font-size:12px;color:#94a3b8">等待扫描...</span></div><div class="card-body" id="oppsList"><div style="text-align:center;padding:20px;color:#94a3b8">启动后自动扫描</div></div></div>
     <div class="card"><div class="card-header"><h2>套利分组</h2><button class="btn btn-primary btn-sm" onclick="openModal('addGroup')">+ 创建分组</button></div><div class="card-body"><div class="table-wrap"><table><thead><tr><th>名称</th><th>策略</th><th>市场数</th><th>操作</th></tr></thead><tbody id="groupsTable"></tbody></table></div><div id="noGroups" style="text-align:center;padding:20px;color:#94a3b8">暂无分组</div></div></div>
     <div class="card"><div class="card-header"><h2>风险控制</h2><button class="btn btn-ghost btn-sm" onclick="saveRisk()">保存设置</button></div><div class="card-body"><div class="form-row"><div class="form-group"><label>最大持仓 (USD)</label><input type="number" class="form-control" id="riskMaxPosition" value="100"></div><div class="form-group"><label>日亏损限额 (USD)</label><input type="number" class="form-control" id="riskDailyLoss" value="50"></div></div><div class="form-row"><div class="form-group"><label>单笔交易上限 (USD)</label><input type="number" class="form-control" id="riskMaxTrade" value="20"></div><div class="form-group"><label>最小套利价差</label><input type="number" class="form-control" id="riskMinSpread" value="0.02" step="0.005"></div></div></div></div>
+    <!-- AI Advisory Card -->
+    <div class="card full-width">
+        <div class="card-header">
+            <h2>AI 投资建议</h2>
+            <div style="display:flex;gap:8px;align-items:center">
+                <span id="advisoryTime" style="font-size:11px;color:#64748b"></span>
+                <button class="btn btn-primary btn-sm" onclick="generateAdvisory()" id="btnAdvisory">立即生成</button>
+            </div>
+        </div>
+        <div class="card-body">
+            <div id="advisoryContent" style="font-size:13px;line-height:1.8;color:#cbd5e1;white-space:pre-wrap;max-height:500px;overflow-y:auto">
+                <div style="text-align:center;padding:20px;color:#94a3b8">每天凌晨2点自动生成，或点击"立即生成"手动触发</div>
+            </div>
+        </div>
+    </div>
     <div class="card"><div class="card-header"><h2>警报</h2><span id="alertCount" style="font-size:12px;color:#94a3b8">0 条未解决</span></div><div class="card-body" id="alertsList" style="max-height:300px;overflow-y:auto"><div style="text-align:center;padding:20px;color:#94a3b8">暂无警报</div></div></div>
     <div class="card"><div class="card-header"><h2>交易记录</h2></div><div class="card-body"><div class="table-wrap"><table><thead><tr><th>时间</th><th>方向</th><th>价格</th><th>数量</th><th>金额</th><th>状态</th></tr></thead><tbody id="tradesTable"></tbody></table></div><div id="noTrades" style="text-align:center;padding:20px;color:#94a3b8">暂无交易记录</div></div></div>
     <div class="card full-width"><div class="card-header"><h2>实时日志</h2><button class="btn btn-ghost btn-sm" onclick="clearLog()">清空</button></div><div class="card-body"><div class="log-feed" id="logFeed"></div></div></div>
@@ -223,8 +238,39 @@ async function loadModeAndStrategies() {
 }
 async function updateConviction(cid, val) { await api('/markets/' + cid + '/conviction', 'PUT', { conviction: parseInt(val) / 100 }); }
 
+// AI Advisory
+async function loadAdvisory() {
+  try {
+    const r = await api('/ai-advisory/latest');
+    if (r && r.content) {
+      document.getElementById('advisoryContent').innerHTML = formatAdvisory(r.content);
+      if (r.created_at) document.getElementById('advisoryTime').textContent = '更新: ' + new Date(r.created_at).toLocaleString();
+    }
+  } catch {}
+}
+function formatAdvisory(text) {
+  return text.replace(/### (.*)/g, '<h4 style="color:#60a5fa;margin:12px 0 6px;font-size:14px">$1</h4>')
+    .replace(/## (.*)/g, '<h3 style="color:#818cf8;margin:14px 0 8px;font-size:15px">$1</h3>')
+    .replace(/\*\*(.*?)\*\*/g, '<strong style="color:#e2e8f0">$1</strong>')
+    .replace(/^- (.*)/gm, '<div style="padding-left:12px;border-left:2px solid #334155;margin:3px 0">$1</div>');
+}
+async function generateAdvisory() {
+  const btn = document.getElementById('btnAdvisory');
+  btn.disabled = true; btn.textContent = '生成中...';
+  addLog('正在调用 AI 生成投资建议...', 'info');
+  try {
+    const r = await api('/ai-advisory', 'POST');
+    if (r.advisory) {
+      document.getElementById('advisoryContent').innerHTML = formatAdvisory(r.advisory);
+      document.getElementById('advisoryTime').textContent = '更新: ' + new Date().toLocaleString();
+      addLog('AI 投资建议已生成', 'info');
+    }
+  } catch (e) { addLog('生成失败: ' + e.message, 'error'); }
+  btn.disabled = false; btn.textContent = '立即生成';
+}
+
 async function loadStatus() { try { const s = await api('/bot/status'); updateBotState(s); if (!s.trading_ready) addLog('凭证未配置 - 点击齿轮查看', 'error'); } catch { addLog('后端连接失败', 'error'); } }
-async function init() { await loadStatus(); await loadMarkets(); await loadGroups(); await loadRisk(); await loadTrades(); await loadAlerts(); await loadModeAndStrategies(); checkApi(); setInterval(loadMarkets, 30000); setInterval(loadTrades, 30000); setInterval(loadAlerts, 15000); setInterval(checkApi, 60000); }
+async function init() { await loadStatus(); await loadMarkets(); await loadGroups(); await loadRisk(); await loadTrades(); await loadAlerts(); await loadModeAndStrategies(); loadAdvisory(); checkApi(); setInterval(loadMarkets, 30000); setInterval(loadTrades, 30000); setInterval(loadAlerts, 15000); setInterval(checkApi, 60000); }
 init();
 </script>
 </body>
