@@ -1,0 +1,24 @@
+name = "polymarket-bot-api"
+main = "src/index.ts"
+compatibility_date = "2024-12-01"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "polymarket-bot-db"
+database_id = "placeholder-will-be-replaced-after-create"
+
+[triggers]
+crons = ["*/2 * * * *"]
+
+[vars]
+POLYMARKET_API_URL = "https://clob.polymarket.com"
+GAMMA_API_URL = "https://gamma-api.polymarket.com"
+DATA_API_URL = "https://data-api.polymarket.com"
+
+# Secrets (set via: npx wrangler secret put POLYMARKET_API_KEY)
+# POLYMARKET_API_KEY
+# POLYMARKET_API_SECRET
+# POLYMARKET_API_PASSPHRASE
+# POLYMARKET_PRIVATE_KEY
+# POLYMARKET_FUNDER_ADDRESS
+# ADMIN_PASSWORD

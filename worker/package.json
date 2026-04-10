@@ -1,0 +1,19 @@
+{
+  "name": "polymarket-bot-worker",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "db:init": "wrangler d1 execute polymarket-bot-db --file=schema.sql",
+    "db:init:local": "wrangler d1 execute polymarket-bot-db --local --file=schema.sql"
+  },
+  "dependencies": {
+    "hono": "^4.6.0"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20241218.0",
+    "typescript": "^5.7.0",
+    "wrangler": "^3.99.0"
+  }
+}
