@@ -3,10 +3,14 @@
 import asyncio
 import json
 import logging
+import os
 from datetime import datetime
+from pathlib import Path
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
+from pydantic import BaseModel
 from backend.config import config
 from backend.database import init_db, get_db, get_bot_state, set_bot_state, add_alert
 from backend.models import MarketAdd, ArbitrageGroupCreate, RiskSettings, BotCommand
@@ -18,6 +22,15 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelna
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Polymarket Arbitrage Bot", version="1.0.0")
+
+# CORS - allow Cloudflare Pages frontend to connect
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # WebSocket connections
 ws_clients: set[WebSocket] = set()
@@ -240,3 +253,151 @@ async def price_history(condition_id: str, limit: int = 100):
         )
         rows = await cursor.fetchall()
         return [dict(r) for r in rows]
+
+
+# --- Settings (read / write .env) ---
+
+ENV_PATH = Path(__file__).resolve().parent.parent / ".env"
+
+_SETTING_KEYS = [
+    "POLYMARKET_PRIVATE_KEY",
+    "POLYMARKET_FUNDER_ADDRESS",
+    "POLYMARKET_SIGNATURE_TYPE",
+    "POLYMARKET_API_URL",
+    "POLYMARKET_API_KEY",
+    "POLYMARKET_API_SECRET",
+    "POLYMARKET_API_PASSPHRASE",
+    "GAMMA_API_URL",
+    "DATA_API_URL",
+    "MAX_POSITION_SIZE_USD",
+    "DAILY_LOSS_LIMIT_USD",
+    "MAX_SINGLE_TRADE_USD",
+    "MIN_ARBITRAGE_SPREAD",
+    "POLL_INTERVAL",
+    "HOST",
+    "PORT",
+]
+
+
+def _read_env() -> dict[str, str]:
+    result: dict[str, str] = {}
+    if not ENV_PATH.exists():
+        return result
+    for line in ENV_PATH.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" in line:
+            key, _, value = line.partition("=")
+            result[key.strip()] = value.strip()
+    return result
+
+
+def _write_env(values: dict[str, str]):
+    lines: list[str] = []
+    if ENV_PATH.exists():
+        existing_lines = ENV_PATH.read_text().splitlines()
+    else:
+        existing_lines = []
+
+    written_keys: set[str] = set()
+    for line in existing_lines:
+        stripped = line.strip()
+        if stripped and not stripped.startswith("#") and "=" in stripped:
+            key = stripped.split("=", 1)[0].strip()
+            if key in values:
+                lines.append(f"{key}={values[key]}")
+                written_keys.add(key)
+            else:
+                lines.append(line)
+        else:
+            lines.append(line)
+
+    for key, val in values.items():
+        if key not in written_keys:
+            lines.append(f"{key}={val}")
+
+    ENV_PATH.write_text("\n".join(lines) + "\n")
+
+
+def _mask_secret(value: str) -> str:
+    if not value or value.startswith("your_") or len(value) <= 10:
+        return value
+    return value[:4] + "*" * (len(value) - 8) + value[-4:]
+
+
+_SECRET_KEYS = {"POLYMARKET_PRIVATE_KEY", "POLYMARKET_API_KEY", "POLYMARKET_API_SECRET", "POLYMARKET_API_PASSPHRASE"}
+
+
+@app.get("/api/settings")
+async def get_settings():
+    env = _read_env()
+    settings = {}
+    for key in _SETTING_KEYS:
+        raw = env.get(key, "")
+        if key in _SECRET_KEYS:
+            settings[key] = {"value": _mask_secret(raw), "is_set": bool(raw and not raw.startswith("your_"))}
+        else:
+            settings[key] = {"value": raw, "is_set": bool(raw)}
+    return settings
+
+
+class SettingsUpdate(BaseModel):
+    settings: dict[str, str]
+
+
+@app.put("/api/settings")
+async def update_settings(payload: SettingsUpdate):
+    current = _read_env()
+    for key, new_val in payload.settings.items():
+        if key not in _SETTING_KEYS:
+            continue
+        if key in _SECRET_KEYS and "*" in new_val:
+            continue
+        current[key] = new_val
+    _write_env(current)
+    for key in _SETTING_KEYS:
+        val = current.get(key, "")
+        if hasattr(config, key):
+            field_type = type(getattr(config, key))
+            try:
+                if field_type == float:
+                    setattr(config, key, float(val) if val else 0.0)
+                elif field_type == int:
+                    setattr(config, key, int(val) if val else 0)
+                else:
+                    setattr(config, key, val)
+            except (ValueError, TypeError):
+                pass
+    for key, val in current.items():
+        os.environ[key] = val
+    return {"status": "saved"}
+
+
+@app.get("/api/connection/test")
+async def test_connection():
+    results = {"api_configured": False, "clob_reachable": False, "auth_ok": False, "message": ""}
+    if not config.POLYMARKET_API_KEY or config.POLYMARKET_API_KEY.startswith("your_"):
+        results["message"] = "API Key \u672a\u914d\u7f6e\uff0c\u8bf7\u5728\u8bbe\u7f6e\u4e2d\u586b\u5165\u4f60\u7684 Polymarket API \u51ed\u8bc1"
+        return results
+    results["api_configured"] = True
+    try:
+        data = polymarket.get_markets()
+        if isinstance(data, dict) and "data" in data:
+            results["clob_reachable"] = True
+        else:
+            results["message"] = "CLOB API \u4e0d\u53ef\u8fbe"
+            return results
+    except Exception as e:
+        results["message"] = f"CLOB API \u8fde\u63a5\u5931\u8d25: {str(e)}"
+        return results
+    try:
+        keys = polymarket.get_api_keys()
+        if isinstance(keys, list):
+            results["auth_ok"] = True
+            results["message"] = "\u8fde\u63a5\u6210\u529f\uff01API \u8ba4\u8bc1\u901a\u8fc7"
+        else:
+            results["message"] = "API \u8ba4\u8bc1\u5931\u8d25\uff0c\u8bf7\u68c0\u67e5 API Key / Secret / Passphrase"
+    except Exception as e:
+        results["message"] = f"\u8ba4\u8bc1\u6d4b\u8bd5\u5931\u8d25: {str(e)}"
+    return results
