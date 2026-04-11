@@ -34,6 +34,7 @@
             <div style="text-align:right">
                 <div style="font-size:28px;font-weight:800;color:#fef3c7" id="paperPnlValue">$0.00</div>
                 <div style="font-size:11px;color:#fcd34d">模拟累计收益</div>
+                <button onclick="event.stopPropagation();resetPaperPnl()" style="margin-top:4px;padding:2px 10px;font-size:10px;background:rgba(0,0,0,0.3);border:1px solid #f59e0b;border-radius:4px;color:#fcd34d;cursor:pointer">清零重算</button>
             </div>
         </div>
         <div id="strategyPnlDetail" style="display:none;margin-top:12px;padding-top:12px;border-top:1px solid rgba(251,191,36,0.3)">
@@ -412,6 +413,18 @@ async function updateConviction(cid, val) { await api('/markets/' + cid + '/conv
 
 // AI Advisory
 // Strategy P&L breakdown
+async function resetPaperPnl() {
+  if (!confirm('确定清零所有模拟交易数据？将删除历史模拟交易记录并重新计算。')) return;
+  try {
+    await api('/trades/reset-paper', 'POST');
+    document.getElementById('paperPnlValue').textContent = '$0.00';
+    addLog('模拟数据已清零', 'info');
+    loadStatus(); loadTrades();
+    const detail = document.getElementById('strategyPnlDetail');
+    if (detail.style.display !== 'none') loadStrategyPnl();
+  } catch { addLog('清零失败', 'error'); }
+}
+
 function toggleStrategyPnl() {
   const el = document.getElementById('strategyPnlDetail');
   if (el.style.display === 'none') { el.style.display = ''; loadStrategyPnl(); }

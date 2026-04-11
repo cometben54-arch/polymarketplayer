@@ -786,6 +786,12 @@ app.put('/risk', async c => { const b = await c.req.json(); const db = c.env.DB;
 
 // Trades & Alerts
 app.get('/trades', async c => c.json((await c.env.DB.prepare('SELECT * FROM trades ORDER BY created_at DESC LIMIT ?').bind(+(c.req.query('limit') || '50')).all()).results));
+app.post('/trades/reset-paper', async c => {
+  await c.env.DB.prepare("DELETE FROM trades WHERE mode='paper'").run();
+  await setState(c.env.DB, 'daily_pnl', '0');
+  await setState(c.env.DB, 'total_pnl', '0');
+  return c.json({ status: 'reset' });
+});
 app.get('/trades/pnl-by-strategy', async c => {
   const rows = (await c.env.DB.prepare("SELECT strategy, mode, COUNT(*) as count, SUM(amount_usd) as total_amount FROM trades GROUP BY strategy, mode").all()).results as any[];
   const result: Record<string, { count: number; amount: number; mode: string }> = {};
