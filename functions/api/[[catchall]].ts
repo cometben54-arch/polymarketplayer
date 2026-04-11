@@ -1,11 +1,13 @@
 /**
- * Polymarket Arbitrage Bot v2.0 - Cloudflare Pages Functions API
- * Features: 4 strategies, paper/real mode, AI review, rate-limited trading
+ * Polymarket Arbitrage Bot v2.3 - Cloudflare Pages Functions API
+ * Features: 4 strategies, paper/real mode, AI review, REAL trading via clob-client
  */
 import { Hono } from 'hono';
 import { handle } from 'hono/cloudflare-pages';
 import { cors } from 'hono/cors';
 import { privateKeyToAddress } from 'viem/accounts';
+import { ClobClient, Side, OrderType } from '@polymarket/clob-client';
+import { Wallet } from '@ethersproject/wallet';
 
 interface Env {
   DB: D1Database;
@@ -213,23 +215,92 @@ async function runScan(env: Env) {
 // =============================================
 // TRADE EXECUTION (paper or real)
 // =============================================
+// --- ClobClient factory for real trading ---
+function createClobClient(env: Env, creds: { key: string; secret: string; passphrase: string }): ClobClient {
+  const signer = new Wallet(env.POLYMARKET_PRIVATE_KEY!);
+  return new ClobClient(
+    (env.POLYMARKET_API_URL || 'https://clob.polymarket.com').replace(/\/$/, ''),
+    137, // Polygon chain ID
+    signer,
+    creds,
+    env.POLYMARKET_FUNDER_ADDRESS ? 1 : 0, // signatureType: 1 if funder differs from signer
+    env.POLYMARKET_FUNDER_ADDRESS || undefined,
+  );
+}
+
 async function executeTrade(env: Env, db: D1Database, opp: any, mode: string) {
   await setState(db, 'last_trade_time', Math.floor(Date.now() / 1000).toString());
+  const results: any[] = [];
 
   for (const leg of opp.legs || []) {
-    let orderId = 'paper_' + Date.now();
+    let orderId = 'paper_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6);
     let status = 'filled';
 
     if (mode === 'real') {
-      // Real trade: not implemented yet (needs @polymarket/clob-client for order signing)
-      // For now, log as 'pending_real'
-      status = 'pending_real';
-      orderId = 'real_' + Date.now();
+      // --- REAL TRADE via @polymarket/clob-client ---
+      try {
+        if (!env.POLYMARKET_PRIVATE_KEY || !env.POLYMARKET_API_KEY || !env.POLYMARKET_API_SECRET) {
+          status = 'error_no_creds';
+          orderId = 'err_' + Date.now();
+        } else {
+          const client = createClobClient(env, {
+            key: env.POLYMARKET_API_KEY,
+            secret: env.POLYMARKET_API_SECRET,
+            passphrase: env.POLYMARKET_API_PASSPHRASE || '',
+          });
+
+          const side = leg.side === 'BUY' ? Side.BUY : Side.SELL;
+
+          // Get tick size for this token
+          let tickSize = '0.01';
+          try {
+            const ts = await client.getTickSize(leg.token);
+            if (ts) tickSize = ts;
+          } catch {}
+
+          // Get neg risk
+          let negRisk = false;
+          try {
+            negRisk = await client.getNegRisk(leg.token);
+          } catch {}
+
+          // Place limit order (GTC = Good Till Cancelled)
+          const result = await client.createAndPostOrder(
+            {
+              tokenID: leg.token,
+              price: leg.price,
+              side: side,
+              size: leg.size,
+            },
+            { tickSize, negRisk },
+            OrderType.GTC,
+          );
+
+          if (result && (result.orderID || result.success !== false)) {
+            orderId = result.orderID || result.id || ('real_' + Date.now());
+            status = 'submitted';
+            await db.prepare("INSERT INTO alerts(level,message) VALUES('info',?)").bind(
+              `真实订单已提交: ${leg.side} ${leg.size.toFixed(2)} @ $${leg.price.toFixed(3)} (${opp.strategy})`
+            ).run();
+          } else {
+            status = 'rejected';
+            orderId = 'rej_' + Date.now();
+            const errMsg = JSON.stringify(result).slice(0, 200);
+            await db.prepare("INSERT INTO alerts(level,message) VALUES('warning',?)").bind('订单被拒绝: ' + errMsg).run();
+          }
+        }
+      } catch (e: any) {
+        status = 'error';
+        orderId = 'err_' + Date.now();
+        await db.prepare("INSERT INTO alerts(level,message) VALUES('critical',?)").bind('下单失败: ' + e.message.slice(0, 200)).run();
+      }
     }
 
     await db.prepare('INSERT INTO trades(condition_id,side,token_id,price,size,amount_usd,order_id,status,strategy,mode) VALUES(?,?,?,?,?,?,?,?,?,?)').bind(
       opp.condition_id, leg.side, leg.token, leg.price, leg.size, leg.price * leg.size, orderId, status, opp.strategy, mode
     ).run();
+
+    results.push({ side: leg.side, price: leg.price, status, orderId });
   }
 
   // Update P&L
@@ -239,7 +310,7 @@ async function executeTrade(env: Env, db: D1Database, opp: any, mode: string) {
   await setState(db, 'daily_pnl', dailyPnl.toString());
   await setState(db, 'total_pnl', totalPnl.toString());
 
-  return { strategy: opp.strategy, market: opp.market, mode, profit: opp.profit };
+  return { strategy: opp.strategy, market: opp.market, mode, profit: opp.profit, orders: results };
 }
 
 // =============================================
@@ -584,6 +655,42 @@ app.get('/debug/markets', async c => {
 
 // Scan & AI
 app.post('/scan', async c => c.json(await runScan(c.env)));
+
+// Manual trade: place a single order (for testing)
+app.post('/trade', async c => {
+  const { token_id, price, size, side } = await c.req.json<{ token_id: string; price: number; size: number; side: string }>();
+  if (!token_id || !price || !size || !side) return c.json({ error: 'Missing fields: token_id, price, size, side' }, 400);
+  if (!c.env.POLYMARKET_PRIVATE_KEY || !c.env.POLYMARKET_API_KEY) return c.json({ error: 'Trading credentials not configured' }, 400);
+
+  try {
+    const client = createClobClient(c.env, {
+      key: c.env.POLYMARKET_API_KEY!,
+      secret: c.env.POLYMARKET_API_SECRET!,
+      passphrase: c.env.POLYMARKET_API_PASSPHRASE || '',
+    });
+
+    const orderSide = side === 'BUY' ? Side.BUY : Side.SELL;
+    let tickSize = '0.01';
+    try { const ts = await client.getTickSize(token_id); if (ts) tickSize = ts; } catch {}
+    let negRisk = false;
+    try { negRisk = await client.getNegRisk(token_id); } catch {}
+
+    const result = await client.createAndPostOrder(
+      { tokenID: token_id, price, side: orderSide, size },
+      { tickSize, negRisk },
+      OrderType.GTC,
+    );
+
+    await c.env.DB.prepare('INSERT INTO trades(condition_id,side,token_id,price,size,amount_usd,order_id,status,strategy,mode) VALUES(?,?,?,?,?,?,?,?,?,?)').bind(
+      '', side, token_id, price, size, price * size, result?.orderID || 'manual', 'submitted', 'manual', 'real'
+    ).run();
+
+    return c.json({ success: true, result });
+  } catch (e: any) {
+    return c.json({ error: e.message }, 500);
+  }
+});
+
 app.post('/ai-review', async c => { const { type } = await c.req.json<{ type: string }>(); return c.json({ review: await aiReview(c.env, c.env.DB, type || 'hourly') }); });
 app.get('/ai-reviews', async c => c.json((await c.env.DB.prepare('SELECT * FROM ai_reviews ORDER BY created_at DESC LIMIT 10').all()).results));
 
