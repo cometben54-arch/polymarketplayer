@@ -424,7 +424,7 @@ async function generateAdvisory() {
 }
 
 async function loadStatus() { try { const s = await api('/bot/status'); updateBotState(s); if (!s.trading_ready) addLog('凭证未配置 - 点击齿轮查看', 'error'); } catch { addLog('后端连接失败', 'error'); } }
-async function init() { await loadStatus(); await loadMarkets(); await loadGroups(); await loadRisk(); await loadTrades(); await loadAlerts(); await loadModeAndStrategies(); loadAdvisory(); checkApi(); setInterval(loadMarkets, 30000); setInterval(loadTrades, 30000); setInterval(loadAlerts, 15000); setInterval(checkApi, 60000); }
+async function init() { await loadStatus(); await loadMarkets(); await loadGroups(); await loadRisk(); await loadTrades(); await loadAlerts(); await loadModeAndStrategies(); loadAdvisory(); checkApi(); setInterval(loadMarketPrices, 300000); setInterval(loadTrades, 30000); setInterval(loadAlerts, 15000); setInterval(checkApi, 60000); }
 init();
 </script>
 </body>
