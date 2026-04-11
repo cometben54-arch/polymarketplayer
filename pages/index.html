@@ -24,6 +24,18 @@
 </div>
 
 <div class="dashboard">
+    <!-- Paper Mode Banner -->
+    <div class="full-width" id="paperBanner" style="background:linear-gradient(135deg,#78350f,#92400e);border:1px solid #f59e0b;border-radius:12px;padding:16px 24px;display:flex;justify-content:space-between;align-items:center">
+        <div>
+            <div style="font-size:13px;color:#fcd34d;font-weight:600">PAPER 模拟模式运行中</div>
+            <div style="font-size:11px;color:#fbbf24;margin-top:2px">所有交易为模拟，不使用真金白银</div>
+        </div>
+        <div style="text-align:right">
+            <div style="font-size:28px;font-weight:800;color:#fef3c7" id="paperPnlValue">$0.00</div>
+            <div style="font-size:11px;color:#fcd34d">模拟累计收益</div>
+        </div>
+    </div>
+
     <div class="full-width stats-row">
         <div class="stat-card"><div class="stat-value" id="statDailyPnl">$0.00</div><div class="stat-label">今日盈亏</div></div>
         <div class="stat-card"><div class="stat-value" id="statTotalPnl">$0.00</div><div class="stat-label">总盈亏</div></div>
@@ -423,7 +435,24 @@ async function generateAdvisory() {
   btn.disabled = false; btn.textContent = '立即生成';
 }
 
-async function loadStatus() { try { const s = await api('/bot/status'); updateBotState(s); if (!s.trading_ready) addLog('凭证未配置 - 点击齿轮查看', 'error'); } catch { addLog('后端连接失败', 'error'); } }
+async function loadStatus() {
+  try {
+    const s = await api('/bot/status');
+    updateBotState(s);
+    if (!s.trading_ready) addLog('凭证未配置 - 点击齿轮查看', 'error');
+    // Update paper banner
+    const banner = document.getElementById('paperBanner');
+    const pnlEl = document.getElementById('paperPnlValue');
+    if (s.mode === 'real') {
+      banner.style.display = 'none';
+    } else {
+      banner.style.display = 'flex';
+      const totalPnl = s.total_pnl || 0;
+      pnlEl.textContent = (totalPnl >= 0 ? '+' : '') + '$' + totalPnl.toFixed(2);
+      pnlEl.style.color = totalPnl >= 0 ? '#86efac' : '#fca5a5';
+    }
+  } catch { addLog('后端连接失败', 'error'); }
+}
 async function init() { await loadStatus(); await loadMarkets(); await loadGroups(); await loadRisk(); await loadTrades(); await loadAlerts(); await loadModeAndStrategies(); loadAdvisory(); checkApi(); setInterval(loadMarketPrices, 300000); setInterval(loadTrades, 30000); setInterval(loadAlerts, 15000); setInterval(checkApi, 60000); }
 init();
 </script>
