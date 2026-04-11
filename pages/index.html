@@ -117,11 +117,34 @@
     <div style="background:#1e293b;border-radius:8px;padding:14px;margin-bottom:16px"><h4 style="font-size:14px;margin-bottom:10px;color:#60a5fa">钱包配置</h4>
         <div class="form-group"><label>Private Key</label><input type="text" class="form-control setting-input" data-key="POLYMARKET_PRIVATE_KEY" readonly style="opacity:0.7"></div>
         <div class="form-group"><label>钱包地址</label><input type="text" class="form-control setting-input" data-key="POLYMARKET_FUNDER_ADDRESS" readonly style="opacity:0.7"></div></div>
-    <div style="background:#1e293b;border-radius:8px;padding:14px;margin-bottom:16px"><h4 style="font-size:14px;margin-bottom:10px;color:#60a5fa">AI 辅助分析</h4><small style="color:#94a3b8;font-size:11px;display:block;margin-bottom:8px">接入 AI 模型辅助套利决策分析</small>
-        <div class="form-group"><label>AI 服务商</label><select class="form-control setting-input" data-key="AI_PROVIDER"><option value="openai">OpenAI (GPT)</option><option value="anthropic">Anthropic (Claude)</option><option value="custom">自定义 API</option></select></div>
-        <div class="form-group"><label>AI API Key</label><input type="password" class="form-control setting-input" data-key="AI_API_KEY" placeholder="sk-..."></div>
-        <div class="form-group"><label>AI Model</label><input type="text" class="form-control setting-input" data-key="AI_MODEL" placeholder="gpt-4o / claude-sonnet-4-20250514"></div>
-        <div class="form-group"><label>自定义 API Base URL (可选)</label><input type="text" class="form-control setting-input" data-key="AI_BASE_URL" placeholder="https://api.openai.com/v1"></div></div>
+    <div style="background:#1e293b;border-radius:8px;padding:14px;margin-bottom:16px"><h4 style="font-size:14px;margin-bottom:10px;color:#60a5fa">AI 服务配置</h4><small style="color:#94a3b8;font-size:11px;display:block;margin-bottom:8px">配置多个 AI 服务商，选择主力 AI 驱动分析</small>
+        <div class="form-group"><label>主力 AI</label><select class="form-control" id="activeAiProvider" onchange="switchActiveAi(this.value)"><option value="">未选择 - 请先添加 AI 服务</option></select></div>
+        <div id="aiProviderCards"></div>
+        <div style="margin-top:10px;border-top:1px solid #334155;padding-top:10px">
+            <div class="form-group"><label>添加 AI 服务</label>
+                <select class="form-control" id="newAiProvider" onchange="onNewAiProviderChange(this.value)" style="margin-bottom:8px">
+                    <option value="">选择服务商...</option>
+                    <option value="openai">OpenAI (GPT)</option>
+                    <option value="anthropic">Anthropic (Claude)</option>
+                    <option value="deepseek">DeepSeek</option>
+                    <option value="minimaxi">MiniMax (minimaxi.com)</option>
+                    <option value="minimaxio">MiniMax (minimax.io)</option>
+                    <option value="doubao">豆包 (Doubao)</option>
+                    <option value="custom">自定义 API</option>
+                </select>
+            </div>
+            <div class="form-group"><label>API Key</label><input type="password" class="form-control" id="newAiKey" placeholder="输入 API Key"></div>
+            <div class="form-row">
+                <div class="form-group"><label>Model</label><input type="text" class="form-control" id="newAiModel"></div>
+                <div class="form-group"><label>Base URL</label><input type="text" class="form-control" id="newAiBaseUrl"></div>
+            </div>
+            <div style="display:flex;gap:8px">
+                <button class="btn btn-primary btn-sm" onclick="testAiProvider()">测试</button>
+                <button class="btn btn-success btn-sm" onclick="saveAiProvider()">保存此 AI</button>
+            </div>
+            <div id="aiTestResult" style="margin-top:8px;font-size:12px;display:none"></div>
+        </div>
+    </div>
     <div style="background:#1e293b;border-radius:8px;padding:14px;margin-bottom:16px"><h4 style="font-size:14px;margin-bottom:10px;color:#60a5fa">风险控制 (可修改)</h4>
         <div class="form-row"><div class="form-group"><label>最大持仓</label><input type="number" class="form-control setting-input" data-key="MAX_POSITION_SIZE_USD"></div><div class="form-group"><label>日亏损限额</label><input type="number" class="form-control setting-input" data-key="DAILY_LOSS_LIMIT_USD"></div></div>
         <div class="form-row"><div class="form-group"><label>单笔上限</label><input type="number" class="form-control setting-input" data-key="MAX_SINGLE_TRADE_USD"></div><div class="form-group"><label>最小价差</label><input type="number" class="form-control setting-input" data-key="MIN_ARBITRAGE_SPREAD" step="0.005"></div></div></div>
@@ -204,9 +227,111 @@ function openModal(n) { document.getElementById('modal' + n.charAt(0).toUpperCas
 function closeModal(n) { document.getElementById('modal' + n.charAt(0).toUpperCase() + n.slice(1)).classList.remove('active'); }
 
 // Password settings
+// AI Provider config
+const AI_PROVIDERS = {
+  openai: { name: 'OpenAI', baseUrl: 'https://api.openai.com/v1', model: 'gpt-4o', type: 'openai' },
+  anthropic: { name: 'Claude', baseUrl: 'https://api.anthropic.com', model: 'claude-sonnet-4-20250514', type: 'anthropic' },
+  deepseek: { name: 'DeepSeek', baseUrl: 'https://api.deepseek.com/v1', model: 'deepseek-chat', type: 'openai' },
+  minimaxi: { name: 'MiniMax (minimaxi.com)', baseUrl: 'https://api.minimaxi.chat/v1', model: 'MiniMax-Text-01', type: 'openai' },
+  minimaxio: { name: 'MiniMax (minimax.io)', baseUrl: 'https://api.minimax.io/v1', model: 'MiniMax-Text-01', type: 'openai' },
+  doubao: { name: '豆包 Doubao', baseUrl: 'https://ark.cn-beijing.volces.com/api/v3', model: 'doubao-pro-256k', type: 'openai' },
+  custom: { name: '自定义', baseUrl: '', model: '', type: 'openai' }
+};
+
+function onNewAiProviderChange(val) {
+  const p = AI_PROVIDERS[val];
+  if (p) {
+    document.getElementById('newAiModel').value = p.model;
+    document.getElementById('newAiBaseUrl').value = p.baseUrl;
+  }
+}
+
+async function loadAiProviders() {
+  try {
+    const d = await api('/settings');
+    const stored = d.AI_PROVIDERS_JSON?.value ? JSON.parse(d.AI_PROVIDERS_JSON.value) : [];
+    const activeId = d.AI_ACTIVE_PROVIDER?.value || '';
+    const container = document.getElementById('aiProviderCards');
+    const selector = document.getElementById('activeAiProvider');
+    selector.innerHTML = '<option value="">未选择</option>';
+    if (!stored.length) { container.innerHTML = '<div style="color:#94a3b8;font-size:12px;padding:8px">暂未添加 AI 服务</div>'; return; }
+    container.innerHTML = stored.map(function(p, i) {
+      const isActive = p.id === activeId;
+      return '<div style="background:#252840;border-radius:6px;padding:10px;margin-bottom:6px;border-left:3px solid ' + (isActive ? '#22c55e' : '#334155') + '"><div style="display:flex;justify-content:space-between;align-items:center"><div><span style="font-weight:600;font-size:13px">' + p.name + '</span>' + (isActive ? ' <span style="color:#22c55e;font-size:11px">主力</span>' : '') + '<div style="font-size:11px;color:#94a3b8">' + p.model + ' | ' + (p.tested ? 'OK' : '未测试') + '</div></div><button class="btn btn-danger btn-sm" onclick="removeAiProvider(' + i + ')" style="font-size:11px">删除</button></div></div>';
+    }).join('');
+    stored.forEach(function(p) {
+      var opt = document.createElement('option');
+      opt.value = p.id; opt.textContent = p.name + ' (' + p.model + ')';
+      if (p.id === activeId) opt.selected = true;
+      selector.appendChild(opt);
+    });
+  } catch {}
+}
+
+async function saveAiProvider() {
+  const provider = document.getElementById('newAiProvider').value;
+  const key = document.getElementById('newAiKey').value.trim();
+  const model = document.getElementById('newAiModel').value.trim();
+  const baseUrl = document.getElementById('newAiBaseUrl').value.trim();
+  if (!provider || !key) { alert('请选择服务商并输入 API Key'); return; }
+  const info = AI_PROVIDERS[provider] || AI_PROVIDERS.custom;
+  const entry = { id: provider + '_' + Date.now(), name: info.name, provider: provider, type: info.type, key: key, model: model || info.model, baseUrl: baseUrl || info.baseUrl, tested: false };
+  try {
+    const d = await api('/settings');
+    const stored = d.AI_PROVIDERS_JSON?.value ? JSON.parse(d.AI_PROVIDERS_JSON.value) : [];
+    stored.push(entry);
+    await api('/settings', 'PUT', { settings: { AI_PROVIDERS_JSON: JSON.stringify(stored), AI_PROVIDER: entry.type, AI_API_KEY: entry.key, AI_MODEL: entry.model, AI_BASE_URL: entry.baseUrl } });
+    document.getElementById('newAiProvider').value = ''; document.getElementById('newAiKey').value = '';
+    loadAiProviders(); addLog('AI 服务已添加: ' + entry.name, 'info');
+  } catch (e) { alert('保存失败'); }
+}
+
+async function removeAiProvider(idx) {
+  if (!confirm('确定删除？')) return;
+  const d = await api('/settings');
+  const stored = d.AI_PROVIDERS_JSON?.value ? JSON.parse(d.AI_PROVIDERS_JSON.value) : [];
+  stored.splice(idx, 1);
+  await api('/settings', 'PUT', { settings: { AI_PROVIDERS_JSON: JSON.stringify(stored) } });
+  loadAiProviders();
+}
+
+async function switchActiveAi(id) {
+  try {
+    const d = await api('/settings');
+    const stored = d.AI_PROVIDERS_JSON?.value ? JSON.parse(d.AI_PROVIDERS_JSON.value) : [];
+    const p = stored.find(function(x) { return x.id === id; });
+    if (p) {
+      await api('/settings', 'PUT', { settings: { AI_ACTIVE_PROVIDER: id, AI_PROVIDER: p.type, AI_API_KEY: p.key, AI_MODEL: p.model, AI_BASE_URL: p.baseUrl } });
+      addLog('主力 AI 切换为: ' + p.name, 'info');
+      loadAiProviders();
+    }
+  } catch {}
+}
+
+async function testAiProvider() {
+  const key = document.getElementById('newAiKey').value.trim();
+  const model = document.getElementById('newAiModel').value.trim();
+  const baseUrl = document.getElementById('newAiBaseUrl').value.trim();
+  const provider = document.getElementById('newAiProvider').value;
+  const info = AI_PROVIDERS[provider] || AI_PROVIDERS.custom;
+  const resultEl = document.getElementById('aiTestResult');
+  resultEl.style.display = ''; resultEl.style.color = '#93c5fd'; resultEl.textContent = '测试中...';
+  try {
+    const type = info.type;
+    let res;
+    if (type === 'anthropic') {
+      res = await fetch((baseUrl || 'https://api.anthropic.com') + '/v1/messages', { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-api-key': key, 'anthropic-version': '2023-06-01' }, body: JSON.stringify({ model: model, max_tokens: 20, messages: [{ role: 'user', content: 'Say OK' }] }) });
+    } else {
+      res = await fetch((baseUrl || 'https://api.openai.com/v1') + '/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + key }, body: JSON.stringify({ model: model, max_tokens: 20, messages: [{ role: 'user', content: 'Say OK' }] }) });
+    }
+    if (res.ok) { resultEl.style.color = '#22c55e'; resultEl.textContent = '测试通过！'; }
+    else { const e = await res.text(); resultEl.style.color = '#ef4444'; resultEl.textContent = 'HTTP ' + res.status + ': ' + e.slice(0, 100); }
+  } catch (e) { resultEl.style.color = '#ef4444'; resultEl.textContent = '失败: ' + e.message; }
+}
+
 function promptSettingsPassword() { document.getElementById('settingsPwd').value = ''; document.getElementById('pwdError').style.display = 'none'; openModal('password'); setTimeout(() => document.getElementById('settingsPwd').focus(), 100); }
 function checkSettingsPassword() { if (document.getElementById('settingsPwd').value === 'W@ng2BO') { closeModal('password'); openModal('settings'); loadSettingsForm(); } else { document.getElementById('pwdError').style.display = ''; } }
-async function loadSettingsForm() { try { const d = await api('/settings'); document.querySelectorAll('.setting-input').forEach(el => { const k = el.dataset.key; if (!d[k]) return; el.value = d[k].value || ''; if (el.readOnly) el.style.borderColor = d[k].is_set ? '#22c55e' : '#ef4444'; }); } catch {} }
+async function loadSettingsForm() { try { const d = await api('/settings'); document.querySelectorAll('.setting-input').forEach(el => { const k = el.dataset.key; if (!d[k]) return; el.value = d[k].value || ''; if (el.readOnly) el.style.borderColor = d[k].is_set ? '#22c55e' : '#ef4444'; }); loadAiProviders(); } catch {} }
 async function saveAllSettings() { const msg = document.getElementById('settingsMsg'), s = {}; document.querySelectorAll('.setting-input:not([readonly])').forEach(el => s[el.dataset.key] = el.value); try { await api('/settings', 'PUT', { settings: s }); msg.style.display = ''; msg.style.background = '#065f46'; msg.style.color = '#6ee7b7'; msg.textContent = '已保存！'; addLog('设置已更新', 'info'); setTimeout(() => msg.style.display = 'none', 3000); } catch (e) { msg.style.display = ''; msg.style.background = '#7f1d1d'; msg.style.color = '#fca5a5'; msg.textContent = '失败'; } }
 async function testConnection() { const btn = document.getElementById('btnTestConn'), msg = document.getElementById('settingsMsg'); btn.disabled = true; btn.textContent = '测试中...'; msg.style.display = ''; msg.style.background = '#1e3a5f'; msg.style.color = '#93c5fd'; msg.textContent = '测试中...'; try { const r = await api('/connection/test'); msg.style.background = r.auth_ok ? '#065f46' : r.clob_reachable ? '#78350f' : '#7f1d1d'; msg.style.color = r.auth_ok ? '#6ee7b7' : r.clob_reachable ? '#fcd34d' : '#fca5a5'; msg.textContent = r.message; } catch (e) { msg.style.background = '#7f1d1d'; msg.style.color = '#fca5a5'; msg.textContent = '失败'; } btn.disabled = false; btn.textContent = '测试连接'; }
 
