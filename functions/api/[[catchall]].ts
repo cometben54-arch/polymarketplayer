@@ -68,22 +68,28 @@ async function strategyComplement(env: Env, m: any, minSpread: number, tradeSize
   if (!m.token_yes || !m.token_no) return null;
   const [pY, pN] = await Promise.all([getPrice(env, m.token_yes, 'BUY'), getPrice(env, m.token_no, 'BUY')]);
   if (pY === null || pN === null) return null;
+  if (pY < 0.03 || pN < 0.03) return null; // Skip extreme prices
   const totalCost = pY + pN;
-  const fees = totalCost * TAKER_FEE * 2; // fee on both legs
+  const fees = totalCost * TAKER_FEE * 2;
   const netProfit = 1 - totalCost - fees;
   if (netProfit > minSpread) {
-    const sh = tradeSize / totalCost;
-    return { strategy: 'complement', action: 'BUY_BOTH', spread: netProfit, profit: sh * netProfit, confidence: Math.min(netProfit / 0.05, 1),
+    const sh = Math.min(tradeSize / totalCost, 100); // Cap 100 shares
+    const profit = sh * netProfit;
+    if (profit > tradeSize) return null; // Sanity: profit can't exceed trade size
+    return { strategy: 'complement', action: 'BUY_BOTH', spread: netProfit, profit, confidence: Math.min(netProfit / 0.05, 1),
       legs: [{ token: m.token_yes, side: 'BUY', price: pY, size: sh }, { token: m.token_no, side: 'BUY', price: pN, size: sh }] };
   }
   const [bY, bN] = await Promise.all([getPrice(env, m.token_yes, 'SELL'), getPrice(env, m.token_no, 'SELL')]);
   if (bY !== null && bN !== null) {
+    if (bY < 0.03 || bN < 0.03) return null;
     const totalBid = bY + bN;
     const feesS = totalBid * TAKER_FEE * 2;
     const netProfitS = totalBid - 1 - feesS;
     if (netProfitS > minSpread) {
-      const sh = tradeSize / totalBid;
-      return { strategy: 'complement', action: 'SELL_BOTH', spread: netProfitS, profit: sh * netProfitS, confidence: Math.min(netProfitS / 0.05, 1),
+      const sh = Math.min(tradeSize / totalBid, 100);
+      const profitS = sh * netProfitS;
+      if (profitS > tradeSize) return null;
+      return { strategy: 'complement', action: 'SELL_BOTH', spread: netProfitS, profit: profitS, confidence: Math.min(netProfitS / 0.05, 1),
         legs: [{ token: m.token_yes, side: 'SELL', price: bY, size: sh }, { token: m.token_no, side: 'SELL', price: bN, size: sh }] };
     }
   }
@@ -106,14 +112,15 @@ async function strategyProbability(env: Env, m: any, tradeSize: number): Promise
   const side = deviation > 0 ? 'BUY' : 'SELL';
   const token = deviation > 0 ? m.token_yes : m.token_no;
   const price = await getPrice(env, token, side);
-  if (price === null) return null;
+  if (price === null || price < 0.03) return null;
   const fee = price * TAKER_FEE;
   const winProb = deviation > 0 ? userProb : (1 - userProb);
   const odds = (1 / price) - 1;
   const kelly = Math.max(0, (odds * winProb - (1 - winProb)) / odds);
   const betFraction = Math.min(kelly, 0.25);
-  const size = (tradeSize * betFraction) / price;
-  if (size < 1) return null;
+  const dollarBet = tradeSize * betFraction;
+  const size = Math.min(dollarBet / price, 100); // Cap shares
+  if (size < 1 || dollarBet < 0.50) return null;
   const grossProfit = size * Math.abs(deviation);
   const netProfit = grossProfit - (size * fee);
   if (netProfit < 0.10) return null;
@@ -134,23 +141,24 @@ async function strategyMarketMaking(env: Env, m: any, tradeSize: number): Promis
   const bestBid = parseFloat(book.bids[0].price);
   const bestAsk = parseFloat(book.asks[0].price);
   const spread = bestAsk - bestBid;
-  if (spread < 0.05) return null; // Need ≥5¢ raw spread
+  if (spread < 0.05) return null;
+  // Skip extreme prices where size calculation blows up
+  if (bestBid < 0.05 || bestAsk > 0.95) return null;
 
   const buyPrice = Math.round((bestBid + 0.01) * 100) / 100;
   const sellPrice = Math.round((bestAsk - 0.01) * 100) / 100;
   const netSpread = sellPrice - buyPrice;
   if (netSpread <= 0.02) return null;
 
-  // Size = how many shares we buy with tradeSize dollars
-  const size = tradeSize / buyPrice;
-  // Revenue from selling those shares
+  // Size: cap so neither leg exceeds tradeSize
+  const maxSize = Math.min(tradeSize / buyPrice, tradeSize / sellPrice);
+  const size = Math.min(maxSize, 200); // Hard cap 200 shares
   const revenue = size * sellPrice;
-  // Cost of buying
-  const cost = size * buyPrice; // = tradeSize
-  // Fees: 2% taker on both buy and sell
+  const cost = size * buyPrice;
+  // Both legs must be within tradeSize
+  if (cost > tradeSize * 1.1 || revenue > tradeSize * 3) return null;
   const feeBuy = cost * TAKER_FEE;
   const feeSell = revenue * TAKER_FEE;
-  // Net profit = revenue - cost - fees
   const profit = revenue - cost - feeBuy - feeSell;
 
   if (profit < 0.10) return null;
@@ -181,8 +189,9 @@ async function strategyMomentum(env: Env, m: any, db: D1Database, tradeSize: num
   const token = change > 0 ? m.token_yes : m.token_no;
   if (!token) return null;
   const price = await getPrice(env, token, side);
-  if (price === null) return null;
-  const size = (tradeSize * 0.5) / price; // Use half size for momentum (riskier)
+  if (price === null || price < 0.03) return null;
+  const dollarBet = tradeSize * 0.5; // Half size for momentum (riskier)
+  const size = Math.min(dollarBet / price, 100); // Cap shares
   const fee = size * price * TAKER_FEE;
   const netProfit = size * pctChange * price - fee;
   if (netProfit < 0.10) return null;
@@ -411,15 +420,33 @@ async function runScan(env: Env) {
     } catch {}
   }
 
-  // Auto-trade best opportunity (rate limited, profit > $0.10)
+  // Risk controls
+  const maxPosition = parseFloat(await getSetting(db, 'MAX_POSITION_SIZE_USD', '50'));
+  const dailyLossLimit = parseFloat(await getSetting(db, 'DAILY_LOSS_LIMIT_USD', '20'));
+  const dailyPnl = parseFloat(await getState(db, 'daily_pnl') || '0');
+
+  // Filter: profit must be real, each leg must be within tradeSize, total within maxPosition
+  const validOpps = opps.filter(o => {
+    if (o.profit < 0.10 || o.profit > tradeSize * 2) return false; // Sanity check
+    const totalLegCost = (o.legs || []).reduce((s: number, l: any) => s + l.price * l.size, 0);
+    if (totalLegCost > tradeSize * 2) return false; // Total cost too high
+    return true;
+  });
+
+  // Auto-trade best opportunity (rate limited + risk checks)
   let traded = null;
-  const profitableOpps = opps.filter(o => o.profit >= 0.10);
-  if (profitableOpps.length > 0) {
-    const lastTrade = parseInt(await getState(db, 'last_trade_time') || '0');
-    const now = Math.floor(Date.now() / 1000);
-    if (now - lastTrade >= cooldown) {
-      const best = profitableOpps.sort((a, b) => b.profit - a.profit)[0];
-      traded = await executeTrade(env, db, best, mode);
+  if (validOpps.length > 0) {
+    // Check daily loss limit
+    if (dailyPnl <= -dailyLossLimit) {
+      await addAlert(db, 'critical', `日亏损已达限额 $${dailyLossLimit}，自动暂停交易`);
+      await setState(db, 'paused', 'true');
+    } else {
+      const lastTrade = parseInt(await getState(db, 'last_trade_time') || '0');
+      const now = Math.floor(Date.now() / 1000);
+      if (now - lastTrade >= cooldown) {
+        const best = validOpps.sort((a, b) => b.profit - a.profit)[0];
+        traded = await executeTrade(env, db, best, mode);
+      }
     }
     const stratNames: Record<string,string> = { complement: '互补套利', probability: '概率偏差', market_making: '做市', momentum: '动量', logical: '逻辑套利' };
     const oppSummary = profitableOpps.map(o => `[${stratNames[o.strategy] || o.strategy}] ${o.market?.slice(0,20)} 利润$${o.profit.toFixed(2)}`).join('; ');
