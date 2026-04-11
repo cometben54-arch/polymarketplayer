@@ -81,6 +81,14 @@
             <div id="advisoryContent" style="font-size:13px;line-height:1.8;color:#cbd5e1;white-space:pre-wrap;max-height:500px;overflow-y:auto">
                 <div style="text-align:center;padding:20px;color:#94a3b8">每天凌晨2点自动生成，或点击"立即生成"手动触发</div>
             </div>
+            <!-- AI Chat follow-up -->
+            <div style="margin-top:14px;border-top:1px solid #334155;padding-top:14px">
+                <div id="aiChatHistory" style="max-height:300px;overflow-y:auto;margin-bottom:10px"></div>
+                <div style="display:flex;gap:8px">
+                    <input type="text" class="form-control" id="aiChatInput" placeholder="基于上面的分析追问..." style="flex:1" onkeydown="if(event.key==='Enter')sendAiChat()">
+                    <button class="btn btn-primary btn-sm" onclick="sendAiChat()" id="btnAiChat">发送</button>
+                </div>
+            </div>
         </div>
     </div>
     <div class="card"><div class="card-header"><h2>警报</h2><span id="alertCount" style="font-size:12px;color:#94a3b8">0 条未解决</span></div><div class="card-body" id="alertsList" style="max-height:300px;overflow-y:auto"><div style="text-align:center;padding:20px;color:#94a3b8">暂无警报</div></div></div>
@@ -477,6 +485,42 @@ async function generateAdvisory() {
     }
   } catch (e) { addLog('生成失败: ' + e.message, 'error'); }
   btn.disabled = false; btn.textContent = '立即生成';
+}
+
+// AI Chat follow-up
+let aiChatMessages = [];
+async function sendAiChat() {
+  const input = document.getElementById('aiChatInput');
+  const msg = input.value.trim();
+  if (!msg) return;
+  input.value = '';
+
+  // Get current advisory content as context
+  const advisoryText = document.getElementById('advisoryContent').innerText || '';
+
+  // Add user message to history
+  aiChatMessages.push({ role: 'user', content: msg });
+  renderAiChat();
+
+  const btn = document.getElementById('btnAiChat');
+  btn.disabled = true; btn.textContent = '思考中...';
+
+  try {
+    const r = await api('/ai-chat', 'POST', { message: msg, context: advisoryText, history: aiChatMessages.slice(-10) });
+    if (r.reply) {
+      aiChatMessages.push({ role: 'assistant', content: r.reply });
+      renderAiChat();
+    }
+  } catch (e) { aiChatMessages.push({ role: 'assistant', content: '请求失败，请重试' }); renderAiChat(); }
+  btn.disabled = false; btn.textContent = '发送';
+}
+function renderAiChat() {
+  const container = document.getElementById('aiChatHistory');
+  container.innerHTML = aiChatMessages.map(function(m) {
+    if (m.role === 'user') return '<div style="margin-bottom:8px;text-align:right"><span style="background:#5b6ef5;padding:6px 12px;border-radius:12px 12px 2px 12px;font-size:13px;display:inline-block;max-width:80%">' + m.content + '</span></div>';
+    return '<div style="margin-bottom:8px"><span style="background:#1e293b;padding:6px 12px;border-radius:12px 12px 12px 2px;font-size:13px;display:inline-block;max-width:80%;white-space:pre-wrap;line-height:1.6">' + formatAdvisory(m.content) + '</span></div>';
+  }).join('');
+  container.scrollTop = container.scrollHeight;
 }
 
 async function loadStatus() {

@@ -947,6 +947,49 @@ app.get('/ai-advisory/latest', async c => {
   return c.json(r || { content: '暂无投资建议。系统将在每天凌晨2点自动生成。', created_at: '' });
 });
 
+// AI Chat: follow-up conversation based on advisory
+app.post('/ai-chat', async c => {
+  const { message, context, history } = await c.req.json<{ message: string; context: string; history: any[] }>();
+  const db = c.env.DB;
+  const aiKey = await getSetting(db, 'AI_API_KEY');
+  const aiProvider = await getSetting(db, 'AI_PROVIDER', 'openai');
+  const aiModel = await getSetting(db, 'AI_MODEL', 'gpt-4o');
+  const aiBaseUrl = await getSetting(db, 'AI_BASE_URL', 'https://api.openai.com/v1');
+  if (!aiKey) return c.json({ reply: 'AI API Key 未配置，请在齿轮设置中添加。' });
+
+  // Build messages with context
+  const systemMsg = `你是 Polymarket 预测市场投资顾问。用户正在查看以下 AI 分析报告，并基于此追问。请用中文回答，简洁实用。
+
+当前分析报告摘要:
+${(context || '无').slice(0, 2000)}`;
+
+  const messages: any[] = [{ role: 'system', content: systemMsg }];
+  // Add chat history
+  for (const h of (history || []).slice(-8)) {
+    if (h.role === 'user' || h.role === 'assistant') messages.push({ role: h.role, content: h.content });
+  }
+  // Add current message
+  messages.push({ role: 'user', content: message });
+
+  try {
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    let reply = '';
+    if (aiProvider === 'anthropic') {
+      headers['x-api-key'] = aiKey; headers['anthropic-version'] = '2023-06-01';
+      const msgs = messages.filter((m: any) => m.role !== 'system');
+      const res = await fetch((aiBaseUrl || 'https://api.anthropic.com') + '/v1/messages', { method: 'POST', headers, body: JSON.stringify({ model: aiModel, max_tokens: 1500, system: systemMsg, messages: msgs }) });
+      const data: any = await res.json();
+      reply = data.content?.[0]?.text || JSON.stringify(data);
+    } else {
+      headers['Authorization'] = `Bearer ${aiKey}`;
+      const res = await fetch(aiBaseUrl + '/chat/completions', { method: 'POST', headers, body: JSON.stringify({ model: aiModel, messages, max_tokens: 1500 }) });
+      const data: any = await res.json();
+      reply = data.choices?.[0]?.message?.content || JSON.stringify(data);
+    }
+    return c.json({ reply });
+  } catch (e: any) { return c.json({ reply: 'AI 请求失败: ' + e.message }); }
+});
+
 // Debug
 app.get('/debug/env', async c => {
   const keys = ['POLYMARKET_API_KEY','POLYMARKET_API_SECRET','POLYMARKET_API_PASSPHRASE','POLYMARKET_PRIVATE_KEY','POLYMARKET_FUNDER_ADDRESS','POLYMARKET_API_URL','GAMMA_API_URL','DATA_API_URL'];
