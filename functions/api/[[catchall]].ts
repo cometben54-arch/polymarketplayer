@@ -439,6 +439,15 @@ app.get('/markets/search', async c => {
     if (q) data = data.filter((m: any) => ((m.question || '') + (m.slug || '')).toLowerCase().includes(q)); return c.json(data.slice(0, 20));
   } catch { return c.json([]); }
 });
+// Helper: parse clobTokenIds which can be a JSON string or array
+function parseClobTokens(raw: any): [string, string] {
+  if (!raw) return ['', ''];
+  let arr = raw;
+  if (typeof raw === 'string') { try { arr = JSON.parse(raw); } catch { return ['', '']; } }
+  if (Array.isArray(arr)) return [arr[0] || '', arr[1] || ''];
+  return ['', ''];
+}
+
 app.post('/markets/resolve-url', async c => {
   const { url } = await c.req.json<{ url: string }>(); if (!url) return c.json({ error: 'URL required' }, 400);
   const match = url.match(/polymarket\.com\/event\/([a-z0-9-]+)/i); if (!match) return c.json({ error: 'Invalid URL' }, 400);
@@ -447,15 +456,19 @@ app.post('/markets/resolve-url', async c => {
     const evtRes = await fetch(`${GAMMA(c.env)}/events?slug=${slug}`);
     if (evtRes.ok) { const events: any[] = await evtRes.json();
       if (events.length > 0 && events[0].markets) {
-        return c.json({ event: events[0].title, slug, markets: events[0].markets.map((m: any) => ({
-          condition_id: m.conditionId || m.condition_id || '', question: m.question || m.groupItemTitle || events[0].title || '',
-          token_yes: m.clobTokenIds?.[0] || '', token_no: m.clobTokenIds?.[1] || '', slug: m.slug || slug })) });
+        return c.json({ event: events[0].title, slug, markets: events[0].markets.map((m: any) => {
+          const [tY, tN] = parseClobTokens(m.clobTokenIds);
+          return { condition_id: m.conditionId || m.condition_id || '', question: m.question || m.groupItemTitle || events[0].title || '',
+            token_yes: tY, token_no: tN, slug: m.slug || slug };
+        }) });
       }
     }
     const mktRes = await fetch(`${GAMMA(c.env)}/markets?slug=${slug}&limit=10`);
     if (mktRes.ok) { const mkts: any[] = await mktRes.json();
-      if (mkts.length) return c.json({ event: mkts[0].question, slug, markets: mkts.map((m: any) => ({
-        condition_id: m.conditionId || m.condition_id || '', question: m.question || '', token_yes: m.clobTokenIds?.[0] || '', token_no: m.clobTokenIds?.[1] || '' })) });
+      if (mkts.length) return c.json({ event: mkts[0].question, slug, markets: mkts.map((m: any) => {
+        const [tY, tN] = parseClobTokens(m.clobTokenIds);
+        return { condition_id: m.conditionId || m.condition_id || '', question: m.question || '', token_yes: tY, token_no: tN };
+      }) });
     }
     return c.json({ error: 'Not found: ' + slug });
   } catch (e: any) { return c.json({ error: e.message }); }
@@ -495,6 +508,44 @@ app.put('/settings', async c => {
   const dbKeys = ['MAX_POSITION_SIZE_USD','DAILY_LOSS_LIMIT_USD','MAX_SINGLE_TRADE_USD','MIN_ARBITRAGE_SPREAD','POLL_INTERVAL','AI_PROVIDER','AI_API_KEY','AI_MODEL','AI_BASE_URL','TRADING_MODE','ENABLED_STRATEGIES','TRADE_COOLDOWN_SEC','AI_PROVIDERS_JSON','AI_ACTIVE_PROVIDER'];
   for (const [k, v] of Object.entries(settings)) { if (dbKeys.includes(k) && v && !v.includes('****')) await db.prepare('INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)').bind(k, v).run(); }
   return c.json({ status: 'saved' }); });
+
+// Fix broken market tokens by re-fetching from Gamma API
+app.post('/markets/fix-tokens', async c => {
+  const mkts = (await c.env.DB.prepare('SELECT * FROM watched_markets WHERE active=1').all()).results as any[];
+  const fixed: string[] = [];
+  for (const m of mkts) {
+    if (m.token_yes && m.token_yes.length > 10 && m.token_no && m.token_no.length > 10) continue; // already valid
+    try {
+      // Try CLOB API first
+      const clob: any = await clobGet(c.env, `/markets/${m.condition_id}`);
+      if (clob && clob.tokens) {
+        const tokens = clob.tokens;
+        const yes = tokens.find((t: any) => t.outcome === 'Yes')?.token_id || tokens[0]?.token_id || '';
+        const no = tokens.find((t: any) => t.outcome === 'No')?.token_id || tokens[1]?.token_id || '';
+        if (yes && no) {
+          await c.env.DB.prepare('UPDATE watched_markets SET token_yes=?, token_no=? WHERE condition_id=?').bind(yes, no, m.condition_id).run();
+          fixed.push(m.question + ': OK');
+          continue;
+        }
+      }
+      // Fallback: Gamma API
+      const gamma = await fetch(`${GAMMA(c.env)}/markets?condition_id=${m.condition_id}`);
+      if (gamma.ok) {
+        const gm: any[] = await gamma.json();
+        if (gm.length > 0) {
+          const [tY, tN] = parseClobTokens(gm[0].clobTokenIds);
+          if (tY && tN) {
+            await c.env.DB.prepare('UPDATE watched_markets SET token_yes=?, token_no=? WHERE condition_id=?').bind(tY, tN, m.condition_id).run();
+            fixed.push(m.question + ': OK (gamma)');
+            continue;
+          }
+        }
+      }
+      fixed.push(m.question + ': FAILED - no tokens found');
+    } catch (e: any) { fixed.push(m.question + ': ERROR - ' + e.message); }
+  }
+  return c.json({ fixed });
+});
 
 // Debug: check market data and token prices
 app.get('/debug/markets', async c => {
