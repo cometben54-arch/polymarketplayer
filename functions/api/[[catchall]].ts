@@ -97,36 +97,25 @@ async function strategyComplement(env: Env, m: any, minSpread: number, tradeSize
 }
 
 // =============================================
-// STRATEGY 2: Probability Deviation + User Conviction
-// If user believes YES=70% but market says 50%, buy YES.
-// Uses Kelly Criterion for position sizing.
+// STRATEGY 2: Probability Deviation (advisory only, NOT auto-trade)
+// User conviction is a personal bias indicator, not a trading signal.
+// This strategy only REPORTS the deviation for the AI advisory.
+// It does NOT generate auto-trade opportunities.
 // =============================================
 async function strategyProbability(env: Env, m: any, tradeSize: number): Promise<any|null> {
   if (!m.token_yes || m.user_conviction === 0.5) return null;
   const marketPrice = await getMidpoint(env, m.token_yes);
   if (marketPrice === null) return null;
-  const userProb = m.user_conviction;
-  const deviation = userProb - marketPrice;
+  const deviation = m.user_conviction - marketPrice;
   if (Math.abs(deviation) < 0.15) return null;
 
-  const side = deviation > 0 ? 'BUY' : 'SELL';
-  const token = deviation > 0 ? m.token_yes : m.token_no;
-  const price = await getPrice(env, token, side);
-  if (price === null || price < 0.03) return null;
-  const fee = price * TAKER_FEE;
-  const winProb = deviation > 0 ? userProb : (1 - userProb);
-  const odds = (1 / price) - 1;
-  const kelly = Math.max(0, (odds * winProb - (1 - winProb)) / odds);
-  const betFraction = Math.min(kelly, 0.25);
-  const dollarBet = tradeSize * betFraction;
-  const size = Math.min(dollarBet / price, 100); // Cap shares
-  if (size < 1 || dollarBet < 0.50) return null;
-  const grossProfit = size * Math.abs(deviation);
-  const netProfit = grossProfit - (size * fee);
-  if (netProfit < 0.10) return null;
-
-  return { strategy: 'probability', action: side + '_' + (deviation > 0 ? 'YES' : 'NO'), spread: Math.abs(deviation),
-    profit: netProfit, confidence: Math.min(Math.abs(deviation) / 0.2, 1), kelly: betFraction,
+  // Report only - no auto-trade legs. This info feeds into AI advisory.
+  return { strategy: 'probability', action: 'ADVISORY_ONLY',
+    spread: Math.abs(deviation), profit: 0, confidence: Math.min(Math.abs(deviation) / 0.2, 1),
+    userConviction: m.user_conviction, marketPrice, deviation,
+    advisory: `用户判断${(m.user_conviction*100).toFixed(0)}% vs 市场${(marketPrice*100).toFixed(0)}%, 偏差${(Math.abs(deviation)*100).toFixed(0)}%`,
+    legs: [] }; // Empty legs = won't auto-trade
+}
     legs: [{ token, side, price, size }] };
 }
 
@@ -425,18 +414,23 @@ async function runScan(env: Env) {
   const dailyLossLimit = parseFloat(await getSetting(db, 'DAILY_LOSS_LIMIT_USD', '20'));
   const dailyPnl = parseFloat(await getState(db, 'daily_pnl') || '0');
 
-  // Filter: profit must be real, each leg must be within tradeSize, total within maxPosition
-  const validOpps = opps.filter(o => {
-    if (o.profit < 0.10 || o.profit > tradeSize * 2) return false; // Sanity check
-    const totalLegCost = (o.legs || []).reduce((s: number, l: any) => s + l.price * l.size, 0);
-    if (totalLegCost > tradeSize * 2) return false; // Total cost too high
+  // Calculate current open position (total paper/real trades not yet settled)
+  const openPositionRes = await db.prepare("SELECT COALESCE(SUM(amount_usd),0) as total FROM trades WHERE side='BUY' AND status IN ('filled','submitted')").first<{total:number}>();
+  const currentPosition = openPositionRes?.total || 0;
+
+  // Filter: only real arbitrage (has legs with both buy+sell, or single leg within budget)
+  const tradableOpps = opps.filter(o => {
+    if (!o.legs || o.legs.length === 0) return false; // Advisory-only (probability)
+    if (o.profit < 0.10 || o.profit > tradeSize * 2) return false;
+    const totalLegCost = o.legs.reduce((s: number, l: any) => s + l.price * l.size, 0);
+    if (totalLegCost > tradeSize * 2) return false;
+    if (currentPosition + totalLegCost > maxPosition) return false; // Would exceed max position
     return true;
   });
 
   // Auto-trade best opportunity (rate limited + risk checks)
   let traded = null;
-  if (validOpps.length > 0) {
-    // Check daily loss limit
+  if (tradableOpps.length > 0) {
     if (dailyPnl <= -dailyLossLimit) {
       await addAlert(db, 'critical', `日亏损已达限额 $${dailyLossLimit}，自动暂停交易`);
       await setState(db, 'paused', 'true');
@@ -444,13 +438,22 @@ async function runScan(env: Env) {
       const lastTrade = parseInt(await getState(db, 'last_trade_time') || '0');
       const now = Math.floor(Date.now() / 1000);
       if (now - lastTrade >= cooldown) {
-        const best = validOpps.sort((a, b) => b.profit - a.profit)[0];
+        const best = tradableOpps.sort((a, b) => b.profit - a.profit)[0];
         traded = await executeTrade(env, db, best, mode);
       }
     }
-    const stratNames: Record<string,string> = { complement: '互补套利', probability: '概率偏差', market_making: '做市', momentum: '动量', logical: '逻辑套利' };
-    const oppSummary = profitableOpps.map(o => `[${stratNames[o.strategy] || o.strategy}] ${o.market?.slice(0,20)} 利润$${o.profit.toFixed(2)}`).join('; ');
-    await addAlert(db, 'info', `扫描${mkts.length}市场 | 有效机会${profitableOpps.length}个${profitableOpps.length ? ': ' + oppSummary : ''}` + (traded ? ` | 已${mode === 'paper' ? '模拟' : '真实'}交易[${stratNames[traded.strategy] || traded.strategy}] $${traded.profit?.toFixed(2)}` : ''));
+  }
+
+  // Log summary (include advisory-only opps for info)
+  const stratNames: Record<string,string> = { complement: '互补套利', probability: '概率偏差', market_making: '做市', momentum: '动量', logical: '逻辑套利' };
+  if (tradableOpps.length > 0 || opps.length > 0) {
+    const tradeableSummary = tradableOpps.map(o => `[${stratNames[o.strategy] || o.strategy}] ${o.market?.slice(0,20)} $${o.profit.toFixed(2)}`).join('; ');
+    const advisorySummary = opps.filter(o => !o.legs?.length).map(o => `[${stratNames[o.strategy] || o.strategy}] ${o.market?.slice(0,20)} ${o.advisory || ''}`).join('; ');
+    await addAlert(db, 'info',
+      `扫描${mkts.length}市场 | 持仓$${currentPosition.toFixed(0)}/$${maxPosition}`
+      + (tradableOpps.length ? ` | 可交易${tradableOpps.length}个: ${tradeableSummary}` : ' | 无可交易机会')
+      + (traded ? ` | 已${mode === 'paper' ? '模拟' : '真实'}交易[${stratNames[traded.strategy] || traded.strategy}]` : '')
+      + (advisorySummary ? ` | 参考: ${advisorySummary}` : ''));
   }
 
   return { scanned: mkts.length, mode, strategies: enabled, opportunities: opps.map(o => ({ strategy: o.strategy, market: o.market, action: o.action, spread: Math.round(o.spread * 10000) / 10000, profit: Math.round(o.profit * 100) / 100, confidence: Math.round(o.confidence * 100) / 100, legs: o.legs?.length || 0 })), traded };
