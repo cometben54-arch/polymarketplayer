@@ -45,7 +45,7 @@
         <button class="btn btn-ghost btn-sm" onclick="saveStrategies()">保存策略</button>
     </div></div>
 
-    <div class="card"><div class="card-header"><h2>监控市场</h2><button class="btn btn-primary btn-sm" onclick="openModal('addMarket')">+ 添加市场</button></div><div class="card-body"><div class="table-wrap"><table><thead><tr><th>问题/话题</th><th>YES</th><th>NO</th><th>我的判断</th><th>操作</th></tr></thead><tbody id="marketsTable"></tbody></table></div><div id="noMarkets" style="text-align:center;padding:20px;color:#94a3b8">暂无监控市场</div></div></div>
+    <div class="card"><div class="card-header"><h2>监控市场</h2><div style="display:flex;gap:6px"><button class="btn btn-ghost btn-sm" onclick="fixTokens()" id="btnFixTokens">修复数据</button><button class="btn btn-primary btn-sm" onclick="openModal('addMarket')">+ 添加市场</button></div></div><div class="card-body"><div class="table-wrap"><table><thead><tr><th>问题/话题</th><th>YES</th><th>NO</th><th>我的判断</th><th>操作</th></tr></thead><tbody id="marketsTable"></tbody></table></div><div id="noMarkets" style="text-align:center;padding:20px;color:#94a3b8">暂无监控市场</div></div></div>
     <div class="card"><div class="card-header"><h2>套利机会</h2><span id="lastScan" style="font-size:12px;color:#94a3b8">等待扫描...</span></div><div class="card-body" id="oppsList"><div style="text-align:center;padding:20px;color:#94a3b8">启动后自动扫描</div></div></div>
     <div class="card"><div class="card-header"><h2>套利分组</h2><button class="btn btn-primary btn-sm" onclick="openModal('addGroup')">+ 创建分组</button></div><div class="card-body"><div class="table-wrap"><table><thead><tr><th>名称</th><th>策略</th><th>市场数</th><th>操作</th></tr></thead><tbody id="groupsTable"></tbody></table></div><div id="noGroups" style="text-align:center;padding:20px;color:#94a3b8">暂无分组</div></div></div>
     <div class="card"><div class="card-header"><h2>风险控制</h2><button class="btn btn-ghost btn-sm" onclick="saveRisk()">保存设置</button></div><div class="card-body"><div class="form-row"><div class="form-group"><label>最大持仓 (USD)</label><input type="number" class="form-control" id="riskMaxPosition" value="100"></div><div class="form-group"><label>日亏损限额 (USD)</label><input type="number" class="form-control" id="riskDailyLoss" value="50"></div></div><div class="form-row"><div class="form-group"><label>单笔交易上限 (USD)</label><input type="number" class="form-control" id="riskMaxTrade" value="20"></div><div class="form-group"><label>最小套利价差</label><input type="number" class="form-control" id="riskMinSpread" value="0.02" step="0.005"></div></div></div></div>
@@ -202,6 +202,16 @@ async function addResolvedMarket(idx) {
 }
 async function addMarketManual() { const c = document.getElementById('marketConditionId').value.trim(), q = document.getElementById('marketQuestion').value.trim(); if (!c || !q) { alert('请填写ID和问题'); return; } await api('/markets', 'POST', { condition_id: c, question: q, token_yes: document.getElementById('marketTokenYes').value.trim() || null, token_no: document.getElementById('marketTokenNo').value.trim() || null }); closeModal('addMarket'); loadMarkets(); }
 async function removeMarket(id) { if (!confirm('确定？')) return; await api('/markets/' + id, 'DELETE'); loadMarkets(); }
+async function fixTokens() {
+  const btn = document.getElementById('btnFixTokens');
+  btn.disabled = true; btn.textContent = '修复中...';
+  try {
+    const r = await api('/markets/fix-tokens', 'POST');
+    if (r.fixed) { addLog('修复结果: ' + r.fixed.join('; '), 'info'); alert('修复完成:\n' + r.fixed.join('\n')); }
+    loadMarkets();
+  } catch (e) { addLog('修复失败', 'error'); }
+  btn.disabled = false; btn.textContent = '修复数据';
+}
 
 // Groups
 async function loadGroups() { const g = await api('/groups'), t = document.getElementById('groupsTable'), e = document.getElementById('noGroups'); if (!g.length) { t.innerHTML = ''; e.style.display = ''; return; } e.style.display = 'none'; const sn = { complement: '互补', multi_outcome: '多结果', correlation: '相关性' }; t.innerHTML = g.map(x => '<tr><td>' + x.name + '</td><td>' + (sn[x.strategy] || x.strategy) + '</td><td>' + (x.market_ids || []).length + '</td><td><button class="btn btn-danger btn-sm" onclick="removeGroup(' + x.id + ')">删除</button></td></tr>').join(''); }
