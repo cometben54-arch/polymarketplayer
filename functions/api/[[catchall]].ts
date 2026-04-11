@@ -57,24 +57,35 @@ async function setState(db: D1Database, k: string, v: string) { await db.prepare
 async function getSetting(db: D1Database, k: string, fb = ''): Promise<string> { const r = await db.prepare('SELECT value FROM settings WHERE key=?').bind(k).first<{value:string}>(); return r?.value || fb; }
 async function addAlert(db: D1Database, level: string, msg: string) { await db.prepare('INSERT INTO alerts(level,message) VALUES(?,?)').bind(level, msg).run(); }
 
+// Polymarket taker fee: 2% (0.02) per side
+const TAKER_FEE = 0.02;
+
 // =============================================
 // STRATEGY 1: Complement Arbitrage (Dutch Book)
-// YES + NO should = $1. If not, guaranteed profit.
+// YES + NO should = $1. If not, guaranteed profit after fees.
 // =============================================
 async function strategyComplement(env: Env, m: any, minSpread: number, tradeSize: number): Promise<any|null> {
   if (!m.token_yes || !m.token_no) return null;
   const [pY, pN] = await Promise.all([getPrice(env, m.token_yes, 'BUY'), getPrice(env, m.token_no, 'BUY')]);
   if (pY === null || pN === null) return null;
-  if (pY + pN < 1 - minSpread) {
-    const sp = 1 - pY - pN, sh = tradeSize / (pY + pN);
-    return { strategy: 'complement', action: 'BUY_BOTH', spread: sp, profit: sh * sp, confidence: Math.min(sp / 0.05, 1),
+  const totalCost = pY + pN;
+  const fees = totalCost * TAKER_FEE * 2; // fee on both legs
+  const netProfit = 1 - totalCost - fees;
+  if (netProfit > minSpread) {
+    const sh = tradeSize / totalCost;
+    return { strategy: 'complement', action: 'BUY_BOTH', spread: netProfit, profit: sh * netProfit, confidence: Math.min(netProfit / 0.05, 1),
       legs: [{ token: m.token_yes, side: 'BUY', price: pY, size: sh }, { token: m.token_no, side: 'BUY', price: pN, size: sh }] };
   }
   const [bY, bN] = await Promise.all([getPrice(env, m.token_yes, 'SELL'), getPrice(env, m.token_no, 'SELL')]);
-  if (bY !== null && bN !== null && bY + bN > 1 + minSpread) {
-    const sp = bY + bN - 1, sh = tradeSize / (bY + bN);
-    return { strategy: 'complement', action: 'SELL_BOTH', spread: sp, profit: sh * sp, confidence: Math.min(sp / 0.05, 1),
-      legs: [{ token: m.token_yes, side: 'SELL', price: bY, size: sh }, { token: m.token_no, side: 'SELL', price: bN, size: sh }] };
+  if (bY !== null && bN !== null) {
+    const totalBid = bY + bN;
+    const feesS = totalBid * TAKER_FEE * 2;
+    const netProfitS = totalBid - 1 - feesS;
+    if (netProfitS > minSpread) {
+      const sh = tradeSize / totalBid;
+      return { strategy: 'complement', action: 'SELL_BOTH', spread: netProfitS, profit: sh * netProfitS, confidence: Math.min(netProfitS / 0.05, 1),
+        legs: [{ token: m.token_yes, side: 'SELL', price: bY, size: sh }, { token: m.token_no, side: 'SELL', price: bN, size: sh }] };
+    }
   }
   return null;
 }
@@ -90,22 +101,25 @@ async function strategyProbability(env: Env, m: any, tradeSize: number): Promise
   if (marketPrice === null) return null;
   const userProb = m.user_conviction;
   const deviation = userProb - marketPrice;
-  if (Math.abs(deviation) < 0.15) return null; // Need >15% deviation
+  if (Math.abs(deviation) < 0.15) return null;
 
-  // Kelly Criterion: f* = (bp - q) / b where b=odds, p=win prob, q=lose prob
   const side = deviation > 0 ? 'BUY' : 'SELL';
   const token = deviation > 0 ? m.token_yes : m.token_no;
   const price = await getPrice(env, token, side);
   if (price === null) return null;
+  const fee = price * TAKER_FEE;
   const winProb = deviation > 0 ? userProb : (1 - userProb);
   const odds = (1 / price) - 1;
   const kelly = Math.max(0, (odds * winProb - (1 - winProb)) / odds);
-  const betFraction = Math.min(kelly, 0.25); // Cap at 25% of bankroll
+  const betFraction = Math.min(kelly, 0.25);
   const size = (tradeSize * betFraction) / price;
   if (size < 1) return null;
+  const grossProfit = size * Math.abs(deviation);
+  const netProfit = grossProfit - (size * fee);
+  if (netProfit < 0.10) return null;
 
   return { strategy: 'probability', action: side + '_' + (deviation > 0 ? 'YES' : 'NO'), spread: Math.abs(deviation),
-    profit: size * Math.abs(deviation), confidence: Math.min(Math.abs(deviation) / 0.2, 1), kelly: betFraction,
+    profit: netProfit, confidence: Math.min(Math.abs(deviation) / 0.2, 1), kelly: betFraction,
     legs: [{ token, side, price, size }] };
 }
 
@@ -127,11 +141,12 @@ async function strategyMarketMaking(env: Env, m: any, tradeSize: number): Promis
   const buyPrice = Math.round((bestBid + 0.01) * 100) / 100;  // Improve best bid by 1¢
   const sellPrice = Math.round((bestAsk - 0.01) * 100) / 100;  // Improve best ask by 1¢
   const netSpread = sellPrice - buyPrice;
-  if (netSpread <= 0.02) return null; // Must have at least 2¢ net after our improvement
+  if (netSpread <= 0.02) return null;
   const size = tradeSize / midPrice;
-  const profit = size * netSpread * 0.8; // 80% fill estimate, conservative
+  const fees = size * (buyPrice + sellPrice) * TAKER_FEE; // fee on both legs
+  const profit = size * netSpread - fees;
 
-  if (profit < 0.10) return null; // Minimum $0.10 profit to bother
+  if (profit < 0.10) return null;
 
   return { strategy: 'market_making', action: 'MAKE_MARKET', spread: netSpread, profit,
     confidence: Math.min(netSpread / 0.06, 1), midPrice,
@@ -161,8 +176,11 @@ async function strategyMomentum(env: Env, m: any, db: D1Database, tradeSize: num
   const price = await getPrice(env, token, side);
   if (price === null) return null;
   const size = (tradeSize * 0.5) / price; // Use half size for momentum (riskier)
+  const fee = size * price * TAKER_FEE;
+  const netProfit = size * pctChange * price - fee;
+  if (netProfit < 0.10) return null;
 
-  return { strategy: 'momentum', action: side + '_MOMENTUM', spread: pctChange, profit: size * pctChange * price,
+  return { strategy: 'momentum', action: side + '_MOMENTUM', spread: pctChange, profit: netProfit,
     confidence: Math.min(pctChange / 0.1, 1), priceChange: change, pctChange,
     legs: [{ token, side, price, size }] };
 }
@@ -213,7 +231,9 @@ async function runScan(env: Env) {
       const best = profitableOpps.sort((a, b) => b.profit - a.profit)[0];
       traded = await executeTrade(env, db, best, mode);
     }
-    await addAlert(db, 'info', `扫描: ${mkts.length}市场, ${opps.length}机会` + (traded ? ` | 已${mode === 'paper' ? '模拟' : ''}交易: ${traded.strategy}` : ''));
+    const stratNames: Record<string,string> = { complement: '互补套利', probability: '概率偏差', market_making: '做市', momentum: '动量' };
+    const oppSummary = profitableOpps.map(o => `[${stratNames[o.strategy] || o.strategy}] ${o.market?.slice(0,20)} 利润$${o.profit.toFixed(2)}`).join('; ');
+    await addAlert(db, 'info', `扫描${mkts.length}市场 | 有效机会${profitableOpps.length}个${profitableOpps.length ? ': ' + oppSummary : ''}` + (traded ? ` | 已${mode === 'paper' ? '模拟' : '真实'}交易[${stratNames[traded.strategy] || traded.strategy}] $${traded.profit?.toFixed(2)}` : ''));
   }
 
   return { scanned: mkts.length, mode, strategies: enabled, opportunities: opps.map(o => ({ strategy: o.strategy, market: o.market, action: o.action, spread: Math.round(o.spread * 10000) / 10000, profit: Math.round(o.profit * 100) / 100, confidence: Math.round(o.confidence * 100) / 100, legs: o.legs?.length || 0 })), traded };
