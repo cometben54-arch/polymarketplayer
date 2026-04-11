@@ -25,14 +25,19 @@
 
 <div class="dashboard">
     <!-- Paper Mode Banner -->
-    <div class="full-width" id="paperBanner" style="background:linear-gradient(135deg,#78350f,#92400e);border:1px solid #f59e0b;border-radius:12px;padding:16px 24px;display:flex;justify-content:space-between;align-items:center">
-        <div>
-            <div style="font-size:13px;color:#fcd34d;font-weight:600">PAPER 模拟模式运行中</div>
-            <div style="font-size:11px;color:#fbbf24;margin-top:2px">所有交易为模拟，不使用真金白银</div>
+    <div class="full-width" id="paperBanner" style="background:linear-gradient(135deg,#78350f,#92400e);border:1px solid #f59e0b;border-radius:12px;padding:16px 24px;cursor:pointer" onclick="toggleStrategyPnl()">
+        <div style="display:flex;justify-content:space-between;align-items:center">
+            <div>
+                <div style="font-size:13px;color:#fcd34d;font-weight:600">PAPER 模拟模式运行中</div>
+                <div style="font-size:11px;color:#fbbf24;margin-top:2px">所有交易为模拟，不使用真金白银 (点击查看策略明细)</div>
+            </div>
+            <div style="text-align:right">
+                <div style="font-size:28px;font-weight:800;color:#fef3c7" id="paperPnlValue">$0.00</div>
+                <div style="font-size:11px;color:#fcd34d">模拟累计收益</div>
+            </div>
         </div>
-        <div style="text-align:right">
-            <div style="font-size:28px;font-weight:800;color:#fef3c7" id="paperPnlValue">$0.00</div>
-            <div style="font-size:11px;color:#fcd34d">模拟累计收益</div>
+        <div id="strategyPnlDetail" style="display:none;margin-top:12px;padding-top:12px;border-top:1px solid rgba(251,191,36,0.3)">
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px" id="strategyPnlGrid"></div>
         </div>
     </div>
 
@@ -405,6 +410,31 @@ async function loadModeAndStrategies() {
 async function updateConviction(cid, val) { await api('/markets/' + cid + '/conviction', 'PUT', { conviction: parseInt(val) / 100 }); }
 
 // AI Advisory
+// Strategy P&L breakdown
+function toggleStrategyPnl() {
+  const el = document.getElementById('strategyPnlDetail');
+  if (el.style.display === 'none') { el.style.display = ''; loadStrategyPnl(); }
+  else el.style.display = 'none';
+}
+async function loadStrategyPnl() {
+  const grid = document.getElementById('strategyPnlGrid');
+  try {
+    const d = await api('/trades/pnl-by-strategy');
+    const names = { complement: '互补套利', probability: '概率偏差', market_making: '做市', momentum: '动量', manual: '手动', unknown: '其他' };
+    const pnl = d.pnl || {};
+    const entries = Object.entries(pnl);
+    if (!entries.length) { grid.innerHTML = '<div style="color:#fbbf24;font-size:12px;grid-column:1/-1">暂无交易数据</div>'; return; }
+    grid.innerHTML = entries.map(function(kv) {
+      const name = names[kv[0]] || kv[0];
+      const val = kv[1];
+      const color = val >= 0 ? '#86efac' : '#fca5a5';
+      return '<div style="background:rgba(0,0,0,0.2);border-radius:8px;padding:10px;text-align:center">'
+        + '<div style="font-size:20px;font-weight:700;color:' + color + '">' + (val >= 0 ? '+' : '') + '$' + val.toFixed(2) + '</div>'
+        + '<div style="font-size:11px;color:#fcd34d;margin-top:2px">' + name + '</div></div>';
+    }).join('');
+  } catch { grid.innerHTML = '<div style="color:#fca5a5;font-size:12px">加载失败</div>'; }
+}
+
 async function loadAdvisory() {
   try {
     const r = await api('/ai-advisory/latest');
