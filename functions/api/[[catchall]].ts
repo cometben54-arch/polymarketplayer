@@ -496,6 +496,30 @@ app.put('/settings', async c => {
   for (const [k, v] of Object.entries(settings)) { if (dbKeys.includes(k) && v && !v.includes('****')) await db.prepare('INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)').bind(k, v).run(); }
   return c.json({ status: 'saved' }); });
 
+// Debug: check market data and token prices
+app.get('/debug/markets', async c => {
+  const mkts = (await c.env.DB.prepare('SELECT * FROM watched_markets WHERE active=1').all()).results as any[];
+  const results = [];
+  for (const m of mkts) {
+    const info: any = { question: m.question, condition_id: m.condition_id, token_yes: m.token_yes || 'EMPTY', token_no: m.token_no || 'EMPTY' };
+    if (m.token_yes) {
+      try { info.price_yes = await getMidpoint(c.env, m.token_yes); } catch (e: any) { info.price_yes_error = e.message; }
+    }
+    if (m.token_no) {
+      try { info.price_no = await getMidpoint(c.env, m.token_no); } catch (e: any) { info.price_no_error = e.message; }
+    }
+    // Try to fetch tokens from CLOB if missing
+    if (!m.token_yes || !m.token_no) {
+      try {
+        const mkt: any = await clobGet(c.env, `/markets/${m.condition_id}`);
+        info.clob_market = mkt ? { tokens: mkt.tokens, clobTokenIds: mkt.clobTokenIds } : 'not found';
+      } catch (e: any) { info.clob_error = e.message; }
+    }
+    results.push(info);
+  }
+  return c.json(results);
+});
+
 // Scan & AI
 app.post('/scan', async c => c.json(await runScan(c.env)));
 app.post('/ai-review', async c => { const { type } = await c.req.json<{ type: string }>(); return c.json({ review: await aiReview(c.env, c.env.DB, type || 'hourly') }); });
