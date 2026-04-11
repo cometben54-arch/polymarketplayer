@@ -120,15 +120,21 @@ async function strategyMarketMaking(env: Env, m: any, tradeSize: number): Promis
   const bestBid = parseFloat(book.bids[0].price);
   const bestAsk = parseFloat(book.asks[0].price);
   const spread = bestAsk - bestBid;
-  if (spread < 0.03) return null; // Need ≥3¢ spread to be profitable after fees
+  // Need spread > 5¢ to cover 2% taker fee on both sides (~4¢ on a 50¢ token)
+  if (spread < 0.05) return null;
 
   const midPrice = (bestBid + bestAsk) / 2;
-  const buyPrice = Math.round((midPrice - spread * 0.3) * 100) / 100;
-  const sellPrice = Math.round((midPrice + spread * 0.3) * 100) / 100;
+  const buyPrice = Math.round((bestBid + 0.01) * 100) / 100;  // Improve best bid by 1¢
+  const sellPrice = Math.round((bestAsk - 0.01) * 100) / 100;  // Improve best ask by 1¢
+  const netSpread = sellPrice - buyPrice;
+  if (netSpread <= 0.02) return null; // Must have at least 2¢ net after our improvement
   const size = tradeSize / midPrice;
+  const profit = size * netSpread * 0.8; // 80% fill estimate, conservative
 
-  return { strategy: 'market_making', action: 'MAKE_MARKET', spread, profit: size * spread * 0.4,
-    confidence: Math.min(spread / 0.06, 1), midPrice,
+  if (profit < 0.10) return null; // Minimum $0.10 profit to bother
+
+  return { strategy: 'market_making', action: 'MAKE_MARKET', spread: netSpread, profit,
+    confidence: Math.min(netSpread / 0.06, 1), midPrice,
     legs: [{ token: m.token_yes, side: 'BUY', price: buyPrice, size }, { token: m.token_yes, side: 'SELL', price: sellPrice, size }] };
 }
 
@@ -197,13 +203,14 @@ async function runScan(env: Env) {
     } catch {}
   }
 
-  // Auto-trade best opportunity (rate limited)
+  // Auto-trade best opportunity (rate limited, profit > $0.10)
   let traded = null;
-  if (opps.length > 0) {
+  const profitableOpps = opps.filter(o => o.profit >= 0.10);
+  if (profitableOpps.length > 0) {
     const lastTrade = parseInt(await getState(db, 'last_trade_time') || '0');
     const now = Math.floor(Date.now() / 1000);
     if (now - lastTrade >= cooldown) {
-      const best = opps.sort((a, b) => b.profit - a.profit)[0];
+      const best = profitableOpps.sort((a, b) => b.profit - a.profit)[0];
       traded = await executeTrade(env, db, best, mode);
     }
     await addAlert(db, 'info', `扫描: ${mkts.length}市场, ${opps.length}机会` + (traded ? ` | 已${mode === 'paper' ? '模拟' : ''}交易: ${traded.strategy}` : ''));
