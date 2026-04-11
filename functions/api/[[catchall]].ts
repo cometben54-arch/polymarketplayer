@@ -134,22 +134,29 @@ async function strategyMarketMaking(env: Env, m: any, tradeSize: number): Promis
   const bestBid = parseFloat(book.bids[0].price);
   const bestAsk = parseFloat(book.asks[0].price);
   const spread = bestAsk - bestBid;
-  // Need spread > 5¢ to cover 2% taker fee on both sides (~4¢ on a 50¢ token)
-  if (spread < 0.05) return null;
+  if (spread < 0.05) return null; // Need ≥5¢ raw spread
 
-  const midPrice = (bestBid + bestAsk) / 2;
-  const buyPrice = Math.round((bestBid + 0.01) * 100) / 100;  // Improve best bid by 1¢
-  const sellPrice = Math.round((bestAsk - 0.01) * 100) / 100;  // Improve best ask by 1¢
+  const buyPrice = Math.round((bestBid + 0.01) * 100) / 100;
+  const sellPrice = Math.round((bestAsk - 0.01) * 100) / 100;
   const netSpread = sellPrice - buyPrice;
   if (netSpread <= 0.02) return null;
-  const size = tradeSize / midPrice;
-  const fees = size * (buyPrice + sellPrice) * TAKER_FEE; // fee on both legs
-  const profit = size * netSpread - fees;
+
+  // Size = how many shares we buy with tradeSize dollars
+  const size = tradeSize / buyPrice;
+  // Revenue from selling those shares
+  const revenue = size * sellPrice;
+  // Cost of buying
+  const cost = size * buyPrice; // = tradeSize
+  // Fees: 2% taker on both buy and sell
+  const feeBuy = cost * TAKER_FEE;
+  const feeSell = revenue * TAKER_FEE;
+  // Net profit = revenue - cost - fees
+  const profit = revenue - cost - feeBuy - feeSell;
 
   if (profit < 0.10) return null;
 
   return { strategy: 'market_making', action: 'MAKE_MARKET', spread: netSpread, profit,
-    confidence: Math.min(netSpread / 0.06, 1), midPrice,
+    confidence: Math.min(netSpread / 0.06, 1), midPrice: (bestBid + bestAsk) / 2,
     legs: [{ token: m.token_yes, side: 'BUY', price: buyPrice, size }, { token: m.token_yes, side: 'SELL', price: sellPrice, size }] };
 }
 
