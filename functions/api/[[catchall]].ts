@@ -186,6 +186,178 @@ async function strategyMomentum(env: Env, m: any, db: D1Database, tradeSize: num
 }
 
 // =============================================
+// STRATEGY 5: Logical / Dutch Book Arbitrage
+// Detect pricing contradictions between related markets.
+// E.g. "Team A wins conference" at 24% but "Team A wins championship" at 28%
+// is a contradiction since winning championship implies winning conference.
+// Uses AI to find logical relationships, then checks price consistency.
+// =============================================
+async function strategyLogical(env: Env, allMarkets: any[], db: D1Database, tradeSize: number): Promise<any[]> {
+  if (allMarkets.length < 2) return [];
+
+  // Step 1: Get current prices for all markets
+  const priced: any[] = [];
+  for (const m of allMarkets) {
+    if (!m.token_yes) continue;
+    const p = await getMidpoint(env, m.token_yes);
+    if (p !== null) priced.push({ ...m, price_yes: p, price_no: 1 - p });
+  }
+  if (priced.length < 2) return [];
+
+  // Step 2: Check all pairs for logical contradictions
+  const opps: any[] = [];
+
+  for (let i = 0; i < priced.length; i++) {
+    for (let j = i + 1; j < priced.length; j++) {
+      const a = priced[i], b = priced[j];
+
+      // Check "subset" pattern: if A implies B, then P(A) ≤ P(B)
+      // Example: "X wins final" implies "X wins semifinal"
+      // If P(final) > P(semifinal), contradiction → buy semifinal, sell final
+
+      // Check if questions are related (simple keyword overlap)
+      const wordsA = a.question.toLowerCase().replace(/[^a-z0-9\s]/g, '').split(/\s+/).filter((w: string) => w.length > 3);
+      const wordsB = b.question.toLowerCase().replace(/[^a-z0-9\s]/g, '').split(/\s+/).filter((w: string) => w.length > 3);
+      const overlap = wordsA.filter((w: string) => wordsB.includes(w));
+      if (overlap.length < 2) continue; // Not enough keyword overlap to be related
+
+      // Check for temporal/scope contradiction
+      // If market A is a subset of B (e.g. "by June" vs "by December"), P(A) ≤ P(B)
+      const diff = Math.abs(a.price_yes - b.price_yes);
+      if (diff < 0.05) continue; // Prices too similar, no contradiction
+
+      // Determine which should be higher based on question scope
+      // The more specific/restrictive event should have lower probability
+      const aHasNarrower = /by (jan|feb|mar|apr|may|jun)/i.test(a.question) && /by (jul|aug|sep|oct|nov|dec)/i.test(b.question);
+      const bHasNarrower = /by (jan|feb|mar|apr|may|jun)/i.test(b.question) && /by (jul|aug|sep|oct|nov|dec)/i.test(a.question);
+
+      let contradiction = false;
+      let buyMarket: any = null, sellMarket: any = null;
+
+      if (aHasNarrower && a.price_yes > b.price_yes + 0.03) {
+        // A is narrower but priced higher → buy B (broader), it's underpriced
+        contradiction = true; buyMarket = b; sellMarket = a;
+      } else if (bHasNarrower && b.price_yes > a.price_yes + 0.03) {
+        contradiction = true; buyMarket = a; sellMarket = b;
+      }
+
+      // General check: if same topic but one is much cheaper and logically should be similar
+      if (!contradiction && overlap.length >= 3 && diff > 0.10) {
+        // Markets with strong keyword overlap but >10% price difference
+        const cheaper = a.price_yes < b.price_yes ? a : b;
+        const pricier = a.price_yes < b.price_yes ? b : a;
+        buyMarket = cheaper; sellMarket = pricier;
+        contradiction = true;
+      }
+
+      if (contradiction && buyMarket && sellMarket) {
+        const spread = Math.abs(buyMarket.price_yes - sellMarket.price_yes);
+        const fee = tradeSize * TAKER_FEE * 2;
+        const size = (tradeSize * 0.3) / buyMarket.price_yes; // Conservative 30% sizing
+        const netProfit = size * spread - fee;
+        if (netProfit < 0.10) continue;
+
+        opps.push({
+          strategy: 'logical', action: 'LOGICAL_ARB',
+          spread, profit: netProfit,
+          confidence: Math.min(spread / 0.15, 1),
+          market: buyMarket.question.slice(0, 40) + ' vs ' + sellMarket.question.slice(0, 40),
+          condition_id: buyMarket.condition_id,
+          detail: `买 "${buyMarket.question.slice(0, 30)}" @${buyMarket.price_yes.toFixed(2)} / 关联 "${sellMarket.question.slice(0, 30)}" @${sellMarket.price_yes.toFixed(2)}`,
+          legs: [{ token: buyMarket.token_yes, side: 'BUY', price: buyMarket.price_yes, size }],
+        });
+      }
+    }
+  }
+
+  return opps;
+}
+
+// AI-enhanced logical arbitrage: uses AI to find deeper logical relationships
+async function strategyLogicalAI(env: Env, allMarkets: any[], db: D1Database, tradeSize: number): Promise<any[]> {
+  // Only run AI check once per hour (expensive)
+  const lastAILogical = await getState(db, 'last_ai_logical');
+  const now = Math.floor(Date.now() / 1000);
+  if (lastAILogical && now - parseInt(lastAILogical) < 3600) return [];
+
+  const aiKey = await getSetting(db, 'AI_API_KEY');
+  if (!aiKey) return [];
+
+  const priced: any[] = [];
+  for (const m of allMarkets) {
+    if (!m.token_yes) continue;
+    const p = await getMidpoint(env, m.token_yes);
+    if (p !== null) priced.push({ question: m.question, price: p, condition_id: m.condition_id, token_yes: m.token_yes });
+  }
+  if (priced.length < 2) return [];
+
+  const aiProvider = await getSetting(db, 'AI_PROVIDER', 'openai');
+  const aiModel = await getSetting(db, 'AI_MODEL', 'gpt-4o');
+  const aiBaseUrl = await getSetting(db, 'AI_BASE_URL', 'https://api.openai.com/v1');
+
+  const prompt = `你是预测市场套利分析师。分析以下市场是否存在逻辑定价矛盾。
+
+市场列表:
+${priced.map((m, i) => `${i + 1}. "${m.question}" → YES价格: ${(m.price * 100).toFixed(1)}%`).join('\n')}
+
+规则:
+- 如果事件A逻辑上蕴含事件B (A发生则B必发生)，那么 P(A) ≤ P(B)
+- 如果事件互斥且穷尽，概率之和应为100%
+- 如果事件有时间范围包含关系（如"6月前" vs "12月前"），较短期限的概率应≤较长期限
+
+请仅回复JSON数组,格式: [{"buy_idx":0,"sell_idx":1,"reason":"简短理由","confidence":0.8}]
+如果没有矛盾,回复空数组 []
+只标记你有高置信度(>0.7)的矛盾。`;
+
+  try {
+    let content = '';
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (aiProvider === 'anthropic') {
+      headers['x-api-key'] = aiKey; headers['anthropic-version'] = '2023-06-01';
+      const res = await fetch((aiBaseUrl || 'https://api.anthropic.com') + '/v1/messages', { method: 'POST', headers, body: JSON.stringify({ model: aiModel, max_tokens: 500, messages: [{ role: 'user', content: prompt }] }) });
+      const data: any = await res.json(); content = data.content?.[0]?.text || '';
+    } else {
+      headers['Authorization'] = `Bearer ${aiKey}`;
+      const res = await fetch(aiBaseUrl + '/chat/completions', { method: 'POST', headers, body: JSON.stringify({ model: aiModel, max_tokens: 500, messages: [{ role: 'user', content: prompt }] }) });
+      const data: any = await res.json(); content = data.choices?.[0]?.message?.content || '';
+    }
+
+    await setState(db, 'last_ai_logical', now.toString());
+
+    // Parse AI response
+    const match = content.match(/\[[\s\S]*?\]/);
+    if (!match) return [];
+    const pairs: any[] = JSON.parse(match[0]);
+    const opps: any[] = [];
+
+    for (const pair of pairs) {
+      if (!pair.buy_idx && pair.buy_idx !== 0) continue;
+      const buy = priced[pair.buy_idx];
+      const sell = priced[pair.sell_idx];
+      if (!buy || !sell) continue;
+
+      const spread = Math.abs(buy.price - sell.price);
+      const size = (tradeSize * 0.3) / buy.price;
+      const fee = size * buy.price * TAKER_FEE;
+      const netProfit = size * spread - fee;
+      if (netProfit < 0.10) continue;
+
+      opps.push({
+        strategy: 'logical', action: 'AI_LOGICAL_ARB', spread, profit: netProfit,
+        confidence: pair.confidence || 0.8,
+        market: buy.question.slice(0, 30) + ' vs ' + sell.question.slice(0, 30),
+        condition_id: buy.condition_id,
+        detail: `AI发现: ${pair.reason}`,
+        legs: [{ token: buy.token_yes, side: 'BUY', price: buy.price, size }],
+      });
+
+      await addAlert(db, 'info', `[逻辑套利] AI发现矛盾: "${buy.question.slice(0, 25)}" vs "${sell.question.slice(0, 25)}" | ${pair.reason}`);
+    }
+    return opps;
+  } catch { return []; }
+}
+
+// =============================================
 // SCAN ENGINE: Run all enabled strategies
 // =============================================
 async function runScan(env: Env) {
@@ -196,7 +368,7 @@ async function runScan(env: Env) {
 
   const minSpread = parseFloat(await getSetting(db, 'MIN_ARBITRAGE_SPREAD', '0.02'));
   const tradeSize = parseFloat(await getSetting(db, 'MAX_SINGLE_TRADE_USD', '20'));
-  const enabledStr = await getSetting(db, 'ENABLED_STRATEGIES', 'complement,probability,market_making,momentum');
+  const enabledStr = await getSetting(db, 'ENABLED_STRATEGIES', 'complement,probability,market_making,momentum,logical');
   const enabled = enabledStr.split(',').map(s => s.trim());
   const mode = await getSetting(db, 'TRADING_MODE', 'paper');
   const cooldown = parseInt(await getSetting(db, 'TRADE_COOLDOWN_SEC', '60'));
@@ -221,6 +393,17 @@ async function runScan(env: Env) {
     } catch {}
   }
 
+  // Logical arbitrage runs across ALL markets (not per-market)
+  if (enabled.includes('logical')) {
+    try {
+      const logicalOpps = await strategyLogical(env, mkts, db, tradeSize);
+      opps.push(...logicalOpps);
+      // Also try AI-enhanced logical (once per hour)
+      const aiLogicalOpps = await strategyLogicalAI(env, mkts, db, tradeSize);
+      opps.push(...aiLogicalOpps);
+    } catch {}
+  }
+
   // Auto-trade best opportunity (rate limited, profit > $0.10)
   let traded = null;
   const profitableOpps = opps.filter(o => o.profit >= 0.10);
@@ -231,7 +414,7 @@ async function runScan(env: Env) {
       const best = profitableOpps.sort((a, b) => b.profit - a.profit)[0];
       traded = await executeTrade(env, db, best, mode);
     }
-    const stratNames: Record<string,string> = { complement: '互补套利', probability: '概率偏差', market_making: '做市', momentum: '动量' };
+    const stratNames: Record<string,string> = { complement: '互补套利', probability: '概率偏差', market_making: '做市', momentum: '动量', logical: '逻辑套利' };
     const oppSummary = profitableOpps.map(o => `[${stratNames[o.strategy] || o.strategy}] ${o.market?.slice(0,20)} 利润$${o.profit.toFixed(2)}`).join('; ');
     await addAlert(db, 'info', `扫描${mkts.length}市场 | 有效机会${profitableOpps.length}个${profitableOpps.length ? ': ' + oppSummary : ''}` + (traded ? ` | 已${mode === 'paper' ? '模拟' : '真实'}交易[${stratNames[traded.strategy] || traded.strategy}] $${traded.profit?.toFixed(2)}` : ''));
   }
@@ -507,7 +690,7 @@ app.get('/bot/status', async c => {
   return c.json({ running: (await getState(db, 'running')) === 'true', paused: (await getState(db, 'paused')) === 'true',
     daily_pnl: parseFloat(await getState(db, 'daily_pnl') || '0'), total_pnl: parseFloat(await getState(db, 'total_pnl') || '0'),
     trading_ready: !!(c.env.POLYMARKET_API_KEY && c.env.POLYMARKET_PRIVATE_KEY),
-    mode: await getSetting(db, 'TRADING_MODE', 'paper'), strategies: (await getSetting(db, 'ENABLED_STRATEGIES', 'complement,probability,market_making,momentum')).split(',') });
+    mode: await getSetting(db, 'TRADING_MODE', 'paper'), strategies: (await getSetting(db, 'ENABLED_STRATEGIES', 'complement,probability,market_making,momentum,logical')).split(',') });
 });
 app.post('/bot/control', async c => {
   const { action } = await c.req.json<{ action: string }>(); const db = c.env.DB;

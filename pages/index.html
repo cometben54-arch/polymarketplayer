@@ -58,6 +58,7 @@
             <label style="font-size:12px;cursor:pointer;background:#252840;padding:4px 10px;border-radius:6px"><input type="checkbox" value="probability" class="strat-cb" style="margin-right:4px" checked> 概率偏差(AI)</label>
             <label style="font-size:12px;cursor:pointer;background:#252840;padding:4px 10px;border-radius:6px"><input type="checkbox" value="market_making" class="strat-cb" style="margin-right:4px" checked> 做市商</label>
             <label style="font-size:12px;cursor:pointer;background:#252840;padding:4px 10px;border-radius:6px"><input type="checkbox" value="momentum" class="strat-cb" style="margin-right:4px" checked> 动量套利</label>
+            <label style="font-size:12px;cursor:pointer;background:#252840;padding:4px 10px;border-radius:6px"><input type="checkbox" value="logical" class="strat-cb" style="margin-right:4px" checked> 逻辑套利(AI)</label>
         </div></div>
         <button class="btn btn-ghost btn-sm" onclick="saveStrategies()">保存策略</button>
     </div></div>
@@ -420,7 +421,7 @@ async function loadStrategyPnl() {
   const grid = document.getElementById('strategyPnlGrid');
   try {
     const d = await api('/trades/pnl-by-strategy');
-    const names = { complement: '互补套利', probability: '概率偏差', market_making: '做市', momentum: '动量', manual: '手动', unknown: '其他' };
+    const names = { complement: '互补套利', probability: '概率偏差', market_making: '做市', momentum: '动量', logical: '逻辑套利', manual: '手动', unknown: '其他' };
     const pnl = d.pnl || {};
     const entries = Object.entries(pnl);
     if (!entries.length) { grid.innerHTML = '<div style="color:#fbbf24;font-size:12px;grid-column:1/-1">暂无交易数据</div>'; return; }

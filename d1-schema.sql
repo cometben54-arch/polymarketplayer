@@ -87,6 +87,7 @@ INSERT OR IGNORE INTO bot_state (key, value) VALUES ('total_pnl', '0');
 INSERT OR IGNORE INTO bot_state (key, value) VALUES ('last_reset_date', '');
 INSERT OR IGNORE INTO bot_state (key, value) VALUES ('last_trade_time', '0');
 INSERT OR IGNORE INTO bot_state (key, value) VALUES ('last_ai_review', '');
+INSERT OR IGNORE INTO bot_state (key, value) VALUES ('last_ai_logical', '0');
 
 -- Default settings
 INSERT OR IGNORE INTO settings (key, value) VALUES ('MAX_POSITION_SIZE_USD', '100');
