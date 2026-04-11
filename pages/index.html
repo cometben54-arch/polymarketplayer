@@ -162,8 +162,27 @@ function updateBotState(s) { if (s.running !== undefined) botState.running = s.r
 function updatePnl(id, v) { const e = document.getElementById(id); e.textContent = '$' + v.toFixed(2); e.className = 'stat-value ' + (v >= 0 ? 'stat-positive' : 'stat-negative'); }
 
 // Markets
-async function loadMarkets() { markets = await api('/markets'); const t = document.getElementById('marketsTable'), e = document.getElementById('noMarkets'); if (!markets.length) { t.innerHTML = ''; e.style.display = ''; document.getElementById('statMarkets').textContent = '0'; return; } e.style.display = 'none'; document.getElementById('statMarkets').textContent = markets.length;
-  t.innerHTML = markets.map(m => '<tr><td title="' + m.condition_id + '" style="max-width:200px">' + m.question + '<div style="font-size:11px;color:#64748b">' + (m.topic || '') + '</div></td><td>-</td><td>-</td><td><div style="display:flex;align-items:center;gap:4px"><input type="number" min="0" max="100" value="' + Math.round((m.user_conviction || 0.5) * 100) + '" style="width:50px;padding:2px 4px;background:#252840;border:1px solid #334155;border-radius:4px;color:#e2e8f0;font-size:12px;text-align:center" onchange="updateConviction(\'' + m.condition_id + '\',this.value)"><span style="font-size:11px">%</span></div></td><td><button class="btn btn-danger btn-sm" onclick="removeMarket(\'' + m.condition_id + '\')">删除</button></td></tr>').join(''); }
+async function loadMarkets() {
+  markets = await api('/markets');
+  const t = document.getElementById('marketsTable'), e = document.getElementById('noMarkets');
+  if (!markets.length) { t.innerHTML = ''; e.style.display = ''; document.getElementById('statMarkets').textContent = '0'; return; }
+  e.style.display = 'none'; document.getElementById('statMarkets').textContent = markets.length;
+  t.innerHTML = markets.map(m => '<tr><td title="' + m.condition_id + '" style="max-width:200px">' + m.question + '<div style="font-size:11px;color:#64748b">' + (m.topic || '') + '</div></td><td id="py_' + m.condition_id.slice(0,10) + '" style="color:#22c55e">...</td><td id="pn_' + m.condition_id.slice(0,10) + '" style="color:#ef4444">...</td><td><div style="display:flex;align-items:center;gap:4px"><input type="number" min="0" max="100" value="' + Math.round((m.user_conviction || 0.5) * 100) + '" style="width:50px;padding:2px 4px;background:#252840;border:1px solid #334155;border-radius:4px;color:#e2e8f0;font-size:12px;text-align:center" onchange="updateConviction(\'' + m.condition_id + '\',this.value)"><span style="font-size:11px">%</span></div></td><td><button class="btn btn-danger btn-sm" onclick="removeMarket(\'' + m.condition_id + '\')">删除</button></td></tr>').join('');
+  // Fetch live prices
+  loadMarketPrices();
+}
+async function loadMarketPrices() {
+  try {
+    const prices = await api('/markets/prices');
+    for (const p of prices) {
+      const id = p.condition_id.slice(0,10);
+      const yEl = document.getElementById('py_' + id);
+      const nEl = document.getElementById('pn_' + id);
+      if (yEl) yEl.textContent = p.price_yes !== null ? (p.price_yes * 100).toFixed(1) + '¢' : '-';
+      if (nEl) nEl.textContent = p.price_no !== null ? (p.price_no * 100).toFixed(1) + '¢' : '-';
+    }
+  } catch {}
+}
 let _resolvedMarkets = [];
 async function resolveMarketUrl() {
   const url = document.getElementById('marketUrl').value.trim();

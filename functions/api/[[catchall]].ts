@@ -422,6 +422,17 @@ app.post('/bot/control', async c => {
 
 // Markets CRUD
 app.get('/markets', async c => c.json((await c.env.DB.prepare('SELECT * FROM watched_markets WHERE active=1 ORDER BY added_at DESC').all()).results));
+app.get('/markets/prices', async c => {
+  const mkts = (await c.env.DB.prepare('SELECT condition_id,token_yes,token_no FROM watched_markets WHERE active=1').all()).results as any[];
+  const results = [];
+  for (const m of mkts) {
+    let priceYes = null, priceNo = null;
+    try { if (m.token_yes && m.token_yes.length > 5) priceYes = await getMidpoint(c.env, m.token_yes); } catch {}
+    try { if (m.token_no && m.token_no.length > 5) priceNo = await getMidpoint(c.env, m.token_no); } catch {}
+    results.push({ condition_id: m.condition_id, price_yes: priceYes, price_no: priceNo });
+  }
+  return c.json(results);
+});
 app.post('/markets', async c => {
   const b = await c.req.json();
   await c.env.DB.prepare('INSERT OR REPLACE INTO watched_markets(condition_id,question,token_yes,token_no,user_conviction,topic) VALUES(?,?,?,?,?,?)').bind(b.condition_id, b.question, b.token_yes || null, b.token_no || null, b.user_conviction || 0.5, b.topic || 'other').run();
