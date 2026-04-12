@@ -51,6 +51,47 @@ async function getPrice(env: Env, tid: string, side = 'BUY'): Promise<number | n
 async function getMidpoint(env: Env, tid: string): Promise<number | null> { const d: any = await clobGet(env, `/midpoint?token_id=${tid}`); return d?.mid ? parseFloat(d.mid) : null; }
 async function getOrderbook(env: Env, tid: string): Promise<any> { return clobGet(env, `/book?token_id=${tid}`); }
 
+// --- Account / Position helpers ---
+async function getAccountBalance(env: Env): Promise<number> {
+  // Fetch USDC balance via Data API
+  const addr = env.POLYMARKET_FUNDER_ADDRESS;
+  if (!addr) return 0;
+  try {
+    const dataUrl = (env.DATA_API_URL || 'https://data-api.polymarket.com').replace(/\/$/, '');
+    const res = await fetch(`${dataUrl}/value?user=${addr}`);
+    if (res.ok) { const d: any = await res.json(); return parseFloat(d.value || '0'); }
+  } catch {}
+  return 0;
+}
+
+async function getTokenPosition(env: Env, tokenId: string): Promise<number> {
+  // Fetch user's holdings of a specific token via Data API
+  const addr = env.POLYMARKET_FUNDER_ADDRESS;
+  if (!addr || !tokenId) return 0;
+  try {
+    const dataUrl = (env.DATA_API_URL || 'https://data-api.polymarket.com').replace(/\/$/, '');
+    const res = await fetch(`${dataUrl}/positions?user=${addr}`);
+    if (res.ok) {
+      const positions: any[] = await res.json();
+      const p = positions.find((x: any) => x.asset === tokenId || x.tokenId === tokenId);
+      return p ? parseFloat(p.size || '0') : 0;
+    }
+  } catch {}
+  return 0;
+}
+
+// In paper mode, calculate simulated balance/positions from DB
+async function getPaperBalance(db: D1Database, startingCash = 100): Promise<number> {
+  const res = await db.prepare("SELECT COALESCE(SUM(CASE WHEN side='BUY' THEN -amount_usd ELSE amount_usd END), 0) as net FROM trades WHERE mode='paper' AND status='filled'").first<{net:number}>();
+  return startingCash + (res?.net || 0);
+}
+
+async function getPaperPosition(db: D1Database, tokenId: string): Promise<number> {
+  if (!tokenId) return 0;
+  const res = await db.prepare("SELECT COALESCE(SUM(CASE WHEN side='BUY' THEN size ELSE -size END), 0) as total FROM trades WHERE mode='paper' AND status='filled' AND token_id=?").bind(tokenId).first<{total:number}>();
+  return res?.total || 0;
+}
+
 // --- DB helpers ---
 async function getState(db: D1Database, k: string): Promise<string> { const r = await db.prepare('SELECT value FROM bot_state WHERE key=?').bind(k).first<{value:string}>(); return r?.value || ''; }
 async function setState(db: D1Database, k: string, v: string) { await db.prepare('INSERT OR REPLACE INTO bot_state(key,value,updated_at) VALUES(?,?,datetime("now"))').bind(k, v).run(); }
@@ -97,24 +138,50 @@ async function strategyComplement(env: Env, m: any, minSpread: number, tradeSize
 }
 
 // =============================================
-// STRATEGY 2: Probability Deviation (advisory only, NOT auto-trade)
-// User conviction is a personal bias indicator, not a trading signal.
-// This strategy only REPORTS the deviation for the AI advisory.
-// It does NOT generate auto-trade opportunities.
+// STRATEGY 2: Probability Deviation (with balance/position checks)
+// User conviction vs market price — buy if undervalued, sell if you hold overvalued.
 // =============================================
-async function strategyProbability(env: Env, m: any, tradeSize: number): Promise<any|null> {
+async function strategyProbability(env: Env, m: any, db: D1Database, tradeSize: number, balance: number, mode: string): Promise<any|null> {
   if (!m.token_yes || m.user_conviction === 0.5) return null;
   const marketPrice = await getMidpoint(env, m.token_yes);
   if (marketPrice === null) return null;
   const deviation = m.user_conviction - marketPrice;
   if (Math.abs(deviation) < 0.15) return null;
 
-  // Report only - no auto-trade legs. This info feeds into AI advisory.
-  return { strategy: 'probability', action: 'ADVISORY_ONLY',
-    spread: Math.abs(deviation), profit: 0, confidence: Math.min(Math.abs(deviation) / 0.2, 1),
-    userConviction: m.user_conviction, marketPrice, deviation,
-    advisory: `用户判断${(m.user_conviction*100).toFixed(0)}% vs 市场${(marketPrice*100).toFixed(0)}%, 偏差${(Math.abs(deviation)*100).toFixed(0)}%`,
-    legs: [] }; // Empty legs = won't auto-trade
+  // Kelly fraction capped at 25% of tradeSize
+  const kelly = Math.min(Math.abs(deviation) / 2, 0.25);
+  const dollarBet = Math.min(tradeSize * kelly, balance * 0.1); // Max 10% of balance
+  if (dollarBet < 0.50) return null;
+
+  if (deviation > 0) {
+    // User thinks YES is underpriced → BUY YES (requires cash)
+    const price = await getPrice(env, m.token_yes, 'BUY');
+    if (price === null || price < 0.03 || price > 0.97) return null;
+    if (balance < dollarBet) return null; // Not enough cash
+    const size = Math.min(dollarBet / price, 100);
+    const fee = size * price * TAKER_FEE;
+    const expectedProfit = size * Math.abs(deviation) - fee;
+    if (expectedProfit < 0.10) return null;
+    return { strategy: 'probability', action: 'BUY_YES', spread: Math.abs(deviation), profit: expectedProfit,
+      confidence: Math.min(Math.abs(deviation) / 0.2, 1),
+      advisory: `用户${(m.user_conviction*100).toFixed(0)}% > 市场${(marketPrice*100).toFixed(0)}%, 买YES`,
+      legs: [{ token: m.token_yes, side: 'BUY', price, size }] };
+  } else {
+    // User thinks YES is overpriced → only SELL if we hold YES tokens
+    const position = mode === 'paper' ? await getPaperPosition(db, m.token_yes) : await getTokenPosition(env, m.token_yes);
+    if (position < 1) return null; // No position to sell
+    const price = await getPrice(env, m.token_yes, 'SELL');
+    if (price === null || price < 0.03) return null;
+    const size = Math.min(position, 100, dollarBet / price);
+    if (size < 1) return null;
+    const fee = size * price * TAKER_FEE;
+    const expectedProfit = size * Math.abs(deviation) - fee;
+    if (expectedProfit < 0.10) return null;
+    return { strategy: 'probability', action: 'SELL_YES', spread: Math.abs(deviation), profit: expectedProfit,
+      confidence: Math.min(Math.abs(deviation) / 0.2, 1),
+      advisory: `用户${(m.user_conviction*100).toFixed(0)}% < 市场${(marketPrice*100).toFixed(0)}%, 卖YES (持仓${position.toFixed(0)})`,
+      legs: [{ token: m.token_yes, side: 'SELL', price, size }] };
+  }
 }
     legs: [{ token, side, price, size }] };
 }
@@ -158,11 +225,10 @@ async function strategyMarketMaking(env: Env, m: any, tradeSize: number): Promis
 }
 
 // =============================================
-// STRATEGY 4: Momentum (ADVISORY ONLY)
-// Detects rapid price changes. Reports for AI analysis,
-// does NOT auto-trade (single-leg speculation, not arbitrage).
+// STRATEGY 4: Momentum (with balance/position checks)
+// Buys on upward momentum if cash available; sells on downward momentum only if holding.
 // =============================================
-async function strategyMomentum(env: Env, m: any, db: D1Database, tradeSize: number): Promise<any|null> {
+async function strategyMomentum(env: Env, m: any, db: D1Database, tradeSize: number, balance: number, mode: string): Promise<any|null> {
   if (!m.token_yes) return null;
   const snaps = (await db.prepare('SELECT price_yes,recorded_at FROM price_snapshots WHERE condition_id=? ORDER BY recorded_at DESC LIMIT 10').bind(m.condition_id).all()).results as any[];
   if (snaps.length < 3) return null;
@@ -174,11 +240,38 @@ async function strategyMomentum(env: Env, m: any, db: D1Database, tradeSize: num
   const pctChange = Math.abs(change) / prev5;
   if (pctChange < 0.05) return null;
 
-  return { strategy: 'momentum', action: 'ADVISORY_ONLY',
-    spread: pctChange, profit: 0, confidence: Math.min(pctChange / 0.1, 1),
-    priceChange: change, pctChange,
-    advisory: `价格${change > 0 ? '上涨' : '下跌'}${(pctChange*100).toFixed(1)}% (${prev5.toFixed(3)}→${current.toFixed(3)})`,
-    legs: [] };
+  const dollarBet = Math.min(tradeSize * 0.3, balance * 0.05); // Max 5% of balance for momentum
+  if (dollarBet < 0.50) return null;
+
+  if (change > 0) {
+    // Upward momentum → BUY YES (needs cash)
+    const price = await getPrice(env, m.token_yes, 'BUY');
+    if (price === null || price < 0.03 || price > 0.97) return null;
+    if (balance < dollarBet) return null;
+    const size = Math.min(dollarBet / price, 100);
+    const fee = size * price * TAKER_FEE;
+    const expectedProfit = size * pctChange * price - fee;
+    if (expectedProfit < 0.10) return null;
+    return { strategy: 'momentum', action: 'BUY_MOMENTUM', spread: pctChange, profit: expectedProfit,
+      confidence: Math.min(pctChange / 0.1, 1),
+      advisory: `上涨${(pctChange*100).toFixed(1)}% (${prev5.toFixed(3)}→${current.toFixed(3)})`,
+      legs: [{ token: m.token_yes, side: 'BUY', price, size }] };
+  } else {
+    // Downward momentum → SELL YES only if we hold it
+    const position = mode === 'paper' ? await getPaperPosition(db, m.token_yes) : await getTokenPosition(env, m.token_yes);
+    if (position < 1) return null;
+    const price = await getPrice(env, m.token_yes, 'SELL');
+    if (price === null || price < 0.03) return null;
+    const size = Math.min(position, 100, dollarBet / price);
+    if (size < 1) return null;
+    const fee = size * price * TAKER_FEE;
+    const expectedProfit = size * pctChange * price - fee;
+    if (expectedProfit < 0.10) return null;
+    return { strategy: 'momentum', action: 'SELL_MOMENTUM', spread: pctChange, profit: expectedProfit,
+      confidence: Math.min(pctChange / 0.1, 1),
+      advisory: `下跌${(pctChange*100).toFixed(1)}%, 卖YES (持仓${position.toFixed(0)})`,
+      legs: [{ token: m.token_yes, side: 'SELL', price, size }] };
+  }
 }
 
 // =============================================
@@ -188,7 +281,7 @@ async function strategyMomentum(env: Env, m: any, db: D1Database, tradeSize: num
 // is a contradiction since winning championship implies winning conference.
 // Uses AI to find logical relationships, then checks price consistency.
 // =============================================
-async function strategyLogical(env: Env, allMarkets: any[], db: D1Database, tradeSize: number): Promise<any[]> {
+async function strategyLogical(env: Env, allMarkets: any[], db: D1Database, tradeSize: number, balance: number, mode: string): Promise<any[]> {
   if (allMarkets.length < 2) return [];
 
   // Step 1: Get current prices for all markets
@@ -248,19 +341,24 @@ async function strategyLogical(env: Env, allMarkets: any[], db: D1Database, trad
 
       if (contradiction && buyMarket && sellMarket) {
         const spread = Math.abs(buyMarket.price_yes - sellMarket.price_yes);
-        const fee = tradeSize * TAKER_FEE * 2;
-        const size = (tradeSize * 0.3) / buyMarket.price_yes; // Conservative 30% sizing
+        // Only trade if we have enough cash to buy the underpriced side
+        const dollarBet = Math.min(tradeSize * 0.3, balance * 0.05);
+        if (dollarBet < 0.50) continue;
+        if (balance < dollarBet) continue;
+        if (buyMarket.price_yes < 0.03 || buyMarket.price_yes > 0.97) continue;
+        const size = Math.min(dollarBet / buyMarket.price_yes, 100);
+        const fee = size * buyMarket.price_yes * TAKER_FEE;
         const netProfit = size * spread - fee;
         if (netProfit < 0.10) continue;
 
         opps.push({
-          strategy: 'logical', action: 'ADVISORY_ONLY',
-          spread, profit: 0,
+          strategy: 'logical', action: 'BUY_UNDERPRICED',
+          spread, profit: netProfit,
           confidence: Math.min(spread / 0.15, 1),
           market: buyMarket.question.slice(0, 40) + ' vs ' + sellMarket.question.slice(0, 40),
           condition_id: buyMarket.condition_id,
-          advisory: `逻辑矛盾: "${buyMarket.question.slice(0, 25)}" @${(buyMarket.price_yes*100).toFixed(0)}% vs "${sellMarket.question.slice(0, 25)}" @${(sellMarket.price_yes*100).toFixed(0)}%`,
-          legs: [],
+          advisory: `买低估: "${buyMarket.question.slice(0, 25)}" @${(buyMarket.price_yes*100).toFixed(0)}% (对比 "${sellMarket.question.slice(0, 20)}" @${(sellMarket.price_yes*100).toFixed(0)}%)`,
+          legs: [{ token: buyMarket.token_yes, side: 'BUY', price: buyMarket.price_yes, size }],
         });
       }
     }
@@ -270,7 +368,7 @@ async function strategyLogical(env: Env, allMarkets: any[], db: D1Database, trad
 }
 
 // AI-enhanced logical arbitrage: uses AI to find deeper logical relationships
-async function strategyLogicalAI(env: Env, allMarkets: any[], db: D1Database, tradeSize: number): Promise<any[]> {
+async function strategyLogicalAI(env: Env, allMarkets: any[], db: D1Database, tradeSize: number, balance: number, mode: string): Promise<any[]> {
   // Only run AI check once per hour (expensive)
   const lastAILogical = await getState(db, 'last_ai_logical');
   const now = Math.floor(Date.now() / 1000);
@@ -333,18 +431,22 @@ ${priced.map((m, i) => `${i + 1}. "${m.question}" → YES价格: ${(m.price * 10
       if (!buy || !sell) continue;
 
       const spread = Math.abs(buy.price - sell.price);
-      const size = (tradeSize * 0.3) / buy.price;
+      // Check balance before trading
+      const dollarBet = Math.min(tradeSize * 0.3, balance * 0.05);
+      if (dollarBet < 0.50 || balance < dollarBet) continue;
+      if (buy.price < 0.03 || buy.price > 0.97) continue;
+      const size = Math.min(dollarBet / buy.price, 100);
       const fee = size * buy.price * TAKER_FEE;
       const netProfit = size * spread - fee;
       if (netProfit < 0.10) continue;
 
       opps.push({
-        strategy: 'logical', action: 'ADVISORY_ONLY', spread, profit: 0,
+        strategy: 'logical', action: 'AI_BUY_UNDERPRICED', spread, profit: netProfit,
         confidence: pair.confidence || 0.8,
         market: buy.question.slice(0, 30) + ' vs ' + sell.question.slice(0, 30),
         condition_id: buy.condition_id,
-        advisory: `AI发现矛盾: ${pair.reason} | "${buy.question.slice(0,20)}" @${(buy.price*100).toFixed(0)}% vs "${sell.question.slice(0,20)}" @${(sell.price*100).toFixed(0)}%`,
-        legs: [],
+        advisory: `AI发现矛盾(${pair.reason}): 买 "${buy.question.slice(0,20)}" @${(buy.price*100).toFixed(0)}%`,
+        legs: [{ token: buy.token_yes, side: 'BUY', price: buy.price, size }],
       });
 
       await addAlert(db, 'info', `[逻辑套利] AI发现矛盾: "${buy.question.slice(0, 25)}" vs "${sell.question.slice(0, 25)}" | ${pair.reason}`);
@@ -369,6 +471,10 @@ async function runScan(env: Env) {
   const mode = await getSetting(db, 'TRADING_MODE', 'paper');
   const cooldown = parseInt(await getSetting(db, 'TRADE_COOLDOWN_SEC', '60'));
 
+  // Get current available balance (paper or real)
+  const startingCash = parseFloat(await getSetting(db, 'STARTING_CASH', '100'));
+  const balance = mode === 'paper' ? await getPaperBalance(db, startingCash) : await getAccountBalance(env);
+
   // Price snapshots
   for (const m of mkts) {
     try {
@@ -383,19 +489,18 @@ async function runScan(env: Env) {
   for (const m of mkts) {
     try {
       if (enabled.includes('complement')) { const o = await strategyComplement(env, m, minSpread, tradeSize); if (o) opps.push({ ...o, market: m.question, condition_id: m.condition_id }); }
-      if (enabled.includes('probability')) { const o = await strategyProbability(env, m, tradeSize); if (o) opps.push({ ...o, market: m.question, condition_id: m.condition_id }); }
+      if (enabled.includes('probability')) { const o = await strategyProbability(env, m, db, tradeSize, balance, mode); if (o) opps.push({ ...o, market: m.question, condition_id: m.condition_id }); }
       if (enabled.includes('market_making')) { const o = await strategyMarketMaking(env, m, tradeSize); if (o) opps.push({ ...o, market: m.question, condition_id: m.condition_id }); }
-      if (enabled.includes('momentum')) { const o = await strategyMomentum(env, m, db, tradeSize); if (o) opps.push({ ...o, market: m.question, condition_id: m.condition_id }); }
+      if (enabled.includes('momentum')) { const o = await strategyMomentum(env, m, db, tradeSize, balance, mode); if (o) opps.push({ ...o, market: m.question, condition_id: m.condition_id }); }
     } catch {}
   }
 
   // Logical arbitrage runs across ALL markets (not per-market)
   if (enabled.includes('logical')) {
     try {
-      const logicalOpps = await strategyLogical(env, mkts, db, tradeSize);
+      const logicalOpps = await strategyLogical(env, mkts, db, tradeSize, balance, mode);
       opps.push(...logicalOpps);
-      // Also try AI-enhanced logical (once per hour)
-      const aiLogicalOpps = await strategyLogicalAI(env, mkts, db, tradeSize);
+      const aiLogicalOpps = await strategyLogicalAI(env, mkts, db, tradeSize, balance, mode);
       opps.push(...aiLogicalOpps);
     } catch {}
   }
@@ -715,10 +820,14 @@ app.use('*', cors());
 // Bot status & control
 app.get('/bot/status', async c => {
   const db = c.env.DB;
+  const mode = await getSetting(db, 'TRADING_MODE', 'paper');
+  const startingCash = parseFloat(await getSetting(db, 'STARTING_CASH', '100'));
+  const balance = mode === 'paper' ? await getPaperBalance(db, startingCash) : await getAccountBalance(c.env);
   return c.json({ running: (await getState(db, 'running')) === 'true', paused: (await getState(db, 'paused')) === 'true',
     daily_pnl: parseFloat(await getState(db, 'daily_pnl') || '0'), total_pnl: parseFloat(await getState(db, 'total_pnl') || '0'),
     trading_ready: !!(c.env.POLYMARKET_API_KEY && c.env.POLYMARKET_PRIVATE_KEY),
-    mode: await getSetting(db, 'TRADING_MODE', 'paper'), strategies: (await getSetting(db, 'ENABLED_STRATEGIES', 'complement,probability,market_making,momentum,logical')).split(',') });
+    mode, starting_cash: startingCash, balance,
+    strategies: (await getSetting(db, 'ENABLED_STRATEGIES', 'complement,probability,market_making,momentum,logical')).split(',') });
 });
 app.post('/bot/control', async c => {
   const { action } = await c.req.json<{ action: string }>(); const db = c.env.DB;
@@ -851,7 +960,7 @@ app.get('/settings', async c => {
 });
 app.put('/settings', async c => {
   const { settings } = await c.req.json<{ settings: Record<string, string> }>(); const db = c.env.DB;
-  const dbKeys = ['MAX_POSITION_SIZE_USD','DAILY_LOSS_LIMIT_USD','MAX_SINGLE_TRADE_USD','MIN_ARBITRAGE_SPREAD','POLL_INTERVAL','AI_PROVIDER','AI_API_KEY','AI_MODEL','AI_BASE_URL','TRADING_MODE','ENABLED_STRATEGIES','TRADE_COOLDOWN_SEC','AI_PROVIDERS_JSON','AI_ACTIVE_PROVIDER'];
+  const dbKeys = ['MAX_POSITION_SIZE_USD','DAILY_LOSS_LIMIT_USD','MAX_SINGLE_TRADE_USD','MIN_ARBITRAGE_SPREAD','POLL_INTERVAL','AI_PROVIDER','AI_API_KEY','AI_MODEL','AI_BASE_URL','TRADING_MODE','ENABLED_STRATEGIES','TRADE_COOLDOWN_SEC','AI_PROVIDERS_JSON','AI_ACTIVE_PROVIDER','STARTING_CASH'];
   for (const [k, v] of Object.entries(settings)) { if (dbKeys.includes(k) && v && !v.includes('****')) await db.prepare('INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)').bind(k, v).run(); }
   return c.json({ status: 'saved' }); });
 

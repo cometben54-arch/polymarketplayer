@@ -33,7 +33,7 @@
             </div>
             <div style="text-align:right">
                 <div style="font-size:28px;font-weight:800;color:#fef3c7" id="paperPnlValue">$0.00</div>
-                <div style="font-size:11px;color:#fcd34d">模拟累计收益</div>
+                <div style="font-size:11px;color:#fcd34d">当前模拟余额</div>
                 <button onclick="event.stopPropagation();resetPaperPnl()" style="margin-top:4px;padding:2px 10px;font-size:10px;background:rgba(0,0,0,0.3);border:1px solid #f59e0b;border-radius:4px;color:#fcd34d;cursor:pointer">清零重算</button>
             </div>
         </div>
@@ -534,10 +534,15 @@ async function loadStatus() {
     if (s.mode === 'real') {
       banner.style.display = 'none';
     } else {
-      banner.style.display = 'flex';
-      const totalPnl = s.total_pnl || 0;
-      pnlEl.textContent = (totalPnl >= 0 ? '+' : '') + '$' + totalPnl.toFixed(2);
-      pnlEl.style.color = totalPnl >= 0 ? '#86efac' : '#fca5a5';
+      banner.style.display = '';
+      const balance = s.balance || 0;
+      const startingCash = s.starting_cash || 100;
+      const pnl = balance - startingCash;
+      pnlEl.textContent = '$' + balance.toFixed(2);
+      pnlEl.style.color = pnl >= 0 ? '#86efac' : '#fca5a5';
+      // Show sub-info
+      const subEl = document.querySelector('#paperBanner div > div > div:nth-child(2)');
+      if (subEl) subEl.textContent = '起始 $' + startingCash.toFixed(0) + ' | 盈亏 ' + (pnl >= 0 ? '+' : '') + '$' + pnl.toFixed(2) + ' (点击查看明细)';
     }
   } catch { addLog('后端连接失败', 'error'); }
 }

@@ -98,3 +98,4 @@ INSERT OR IGNORE INTO settings (key, value) VALUES ('POLL_INTERVAL', '120');
 INSERT OR IGNORE INTO settings (key, value) VALUES ('TRADING_MODE', 'paper');
 INSERT OR IGNORE INTO settings (key, value) VALUES ('ENABLED_STRATEGIES', 'complement,probability,market_making,momentum');
 INSERT OR IGNORE INTO settings (key, value) VALUES ('TRADE_COOLDOWN_SEC', '60');
+INSERT OR IGNORE INTO settings (key, value) VALUES ('STARTING_CASH', '100');
