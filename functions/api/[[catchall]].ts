@@ -158,8 +158,9 @@ async function strategyMarketMaking(env: Env, m: any, tradeSize: number): Promis
 }
 
 // =============================================
-// STRATEGY 4: Momentum / Latency (price movement)
-// Detect rapid price changes from historical snapshots.
+// STRATEGY 4: Momentum (ADVISORY ONLY)
+// Detects rapid price changes. Reports for AI analysis,
+// does NOT auto-trade (single-leg speculation, not arbitrage).
 // =============================================
 async function strategyMomentum(env: Env, m: any, db: D1Database, tradeSize: number): Promise<any|null> {
   if (!m.token_yes) return null;
@@ -171,23 +172,13 @@ async function strategyMomentum(env: Env, m: any, db: D1Database, tradeSize: num
 
   const change = current - prev5;
   const pctChange = Math.abs(change) / prev5;
-  if (pctChange < 0.05) return null; // Need >5% move in recent snapshots
+  if (pctChange < 0.05) return null;
 
-  // Momentum: if price going up, buy; if going down, sell
-  const side = change > 0 ? 'BUY' : 'SELL';
-  const token = change > 0 ? m.token_yes : m.token_no;
-  if (!token) return null;
-  const price = await getPrice(env, token, side);
-  if (price === null || price < 0.03) return null;
-  const dollarBet = tradeSize * 0.5; // Half size for momentum (riskier)
-  const size = Math.min(dollarBet / price, 100); // Cap shares
-  const fee = size * price * TAKER_FEE;
-  const netProfit = size * pctChange * price - fee;
-  if (netProfit < 0.10) return null;
-
-  return { strategy: 'momentum', action: side + '_MOMENTUM', spread: pctChange, profit: netProfit,
-    confidence: Math.min(pctChange / 0.1, 1), priceChange: change, pctChange,
-    legs: [{ token, side, price, size }] };
+  return { strategy: 'momentum', action: 'ADVISORY_ONLY',
+    spread: pctChange, profit: 0, confidence: Math.min(pctChange / 0.1, 1),
+    priceChange: change, pctChange,
+    advisory: `价格${change > 0 ? '上涨' : '下跌'}${(pctChange*100).toFixed(1)}% (${prev5.toFixed(3)}→${current.toFixed(3)})`,
+    legs: [] };
 }
 
 // =============================================
@@ -263,13 +254,13 @@ async function strategyLogical(env: Env, allMarkets: any[], db: D1Database, trad
         if (netProfit < 0.10) continue;
 
         opps.push({
-          strategy: 'logical', action: 'LOGICAL_ARB',
-          spread, profit: netProfit,
+          strategy: 'logical', action: 'ADVISORY_ONLY',
+          spread, profit: 0,
           confidence: Math.min(spread / 0.15, 1),
           market: buyMarket.question.slice(0, 40) + ' vs ' + sellMarket.question.slice(0, 40),
           condition_id: buyMarket.condition_id,
-          detail: `买 "${buyMarket.question.slice(0, 30)}" @${buyMarket.price_yes.toFixed(2)} / 关联 "${sellMarket.question.slice(0, 30)}" @${sellMarket.price_yes.toFixed(2)}`,
-          legs: [{ token: buyMarket.token_yes, side: 'BUY', price: buyMarket.price_yes, size }],
+          advisory: `逻辑矛盾: "${buyMarket.question.slice(0, 25)}" @${(buyMarket.price_yes*100).toFixed(0)}% vs "${sellMarket.question.slice(0, 25)}" @${(sellMarket.price_yes*100).toFixed(0)}%`,
+          legs: [],
         });
       }
     }
@@ -348,12 +339,12 @@ ${priced.map((m, i) => `${i + 1}. "${m.question}" → YES价格: ${(m.price * 10
       if (netProfit < 0.10) continue;
 
       opps.push({
-        strategy: 'logical', action: 'AI_LOGICAL_ARB', spread, profit: netProfit,
+        strategy: 'logical', action: 'ADVISORY_ONLY', spread, profit: 0,
         confidence: pair.confidence || 0.8,
         market: buy.question.slice(0, 30) + ' vs ' + sell.question.slice(0, 30),
         condition_id: buy.condition_id,
-        detail: `AI发现: ${pair.reason}`,
-        legs: [{ token: buy.token_yes, side: 'BUY', price: buy.price, size }],
+        advisory: `AI发现矛盾: ${pair.reason} | "${buy.question.slice(0,20)}" @${(buy.price*100).toFixed(0)}% vs "${sell.question.slice(0,20)}" @${(sell.price*100).toFixed(0)}%`,
+        legs: [],
       });
 
       await addAlert(db, 'info', `[逻辑套利] AI发现矛盾: "${buy.question.slice(0, 25)}" vs "${sell.question.slice(0, 25)}" | ${pair.reason}`);
