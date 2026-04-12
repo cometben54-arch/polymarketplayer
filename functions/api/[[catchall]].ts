@@ -183,8 +183,6 @@ async function strategyProbability(env: Env, m: any, db: D1Database, tradeSize: 
       legs: [{ token: m.token_yes, side: 'SELL', price, size }] };
   }
 }
-    legs: [{ token, side, price, size }] };
-}
 
 // =============================================
 // STRATEGY 3: Market Making (bid-ask spread)
