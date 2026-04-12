@@ -552,7 +552,14 @@ async function runScan(env: Env) {
       + (advisorySummary ? ` | 参考: ${advisorySummary}` : ''));
   }
 
-  return { scanned: mkts.length, mode, strategies: enabled, opportunities: opps.map(o => ({ strategy: o.strategy, market: o.market, action: o.action, spread: Math.round(o.spread * 10000) / 10000, profit: Math.round(o.profit * 100) / 100, confidence: Math.round(o.confidence * 100) / 100, legs: o.legs?.length || 0 })), traded };
+  const result = { scanned: mkts.length, mode, balance: Math.round(balance * 100) / 100, strategies: enabled,
+    opportunities: opps.map(o => ({ strategy: o.strategy, market: o.market, action: o.action,
+      spread: Math.round(o.spread * 10000) / 10000, profit: Math.round(o.profit * 100) / 100,
+      confidence: Math.round(o.confidence * 100) / 100, legs: o.legs?.length || 0,
+      advisory: o.advisory || '' })), traded, scanned_at: new Date().toISOString() };
+  // Cache for frontend polling
+  await setState(db, 'last_scan_result', JSON.stringify(result));
+  return result;
 }
 
 // =============================================
@@ -1028,6 +1035,10 @@ app.get('/debug/markets', async c => {
 
 // Scan & AI
 app.post('/scan', async c => c.json(await runScan(c.env)));
+app.get('/scan/latest', async c => {
+  const cached = await getState(c.env.DB, 'last_scan_result');
+  return c.json(cached ? JSON.parse(cached) : { opportunities: [], scanned_at: null });
+});
 
 // Manual trade: place a single order (for testing)
 app.post('/trade', async c => {

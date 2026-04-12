@@ -272,7 +272,38 @@ async function saveRisk() { await api('/risk', 'PUT', { max_position_size_usd: +
 async function loadTrades() { const t = await api('/trades?limit=30'), tb = document.getElementById('tradesTable'), e = document.getElementById('noTrades'); if (!t.length) { tb.innerHTML = ''; e.style.display = ''; return; } e.style.display = 'none'; tb.innerHTML = t.map(x => '<tr><td>' + new Date(x.created_at).toLocaleString() + '</td><td style="color:' + (x.side === 'BUY' ? '#22c55e' : '#ef4444') + '">' + x.side + '</td><td>$' + x.price.toFixed(3) + '</td><td>' + x.size.toFixed(2) + '</td><td>$' + x.amount_usd.toFixed(2) + '</td><td>' + x.status + '</td></tr>').join(''); }
 async function loadAlerts() { const a = await api('/alerts?limit=20'), c = document.getElementById('alertsList'); document.getElementById('alertCount').textContent = a.filter(x => !x.resolved).length + ' 条未解决'; if (!a.length) { c.innerHTML = '<div style="text-align:center;padding:20px;color:#94a3b8">暂无警报</div>'; return; } c.innerHTML = a.map(x => '<div class="alert-item alert-' + x.level + (x.resolved ? ' alert-resolved' : '') + '"><div><strong>' + x.level.toUpperCase() + '</strong> ' + x.message + '</div>' + (!x.resolved ? '<button class="btn btn-ghost btn-sm" onclick="resolveAlert(' + x.id + ')">解决</button>' : '') + '</div>').join(''); }
 async function resolveAlert(id) { await api('/alerts/' + id + '/resolve', 'POST'); loadAlerts(); }
-function renderOpportunities(opps) { const c = document.getElementById('oppsList'); if (!opps || !opps.length) { c.innerHTML = '<div style="text-align:center;padding:20px;color:#94a3b8">暂未发现套利机会</div>'; return; } c.innerHTML = opps.map(o => '<div class="opp-card"><div style="display:flex;justify-content:space-between"><div><div class="opp-spread">' + (o.spread * 100).toFixed(2) + '%</div><div class="opp-detail">' + o.strategy + ' | ' + o.legs + '腿</div></div><div style="color:#22c55e;font-weight:700">+$' + o.expected_profit.toFixed(2) + '</div></div></div>').join(''); }
+async function loadOpportunities() {
+  try {
+    const r = await api('/scan/latest');
+    if (r.scanned_at) document.getElementById('lastScan').textContent = '上次扫描: ' + new Date(r.scanned_at).toLocaleTimeString();
+    document.getElementById('statOpps').textContent = (r.opportunities || []).length;
+    renderOpportunities(r.opportunities || []);
+  } catch {}
+}
+function renderOpportunities(opps) {
+  const c = document.getElementById('oppsList');
+  if (!opps || !opps.length) { c.innerHTML = '<div style="text-align:center;padding:20px;color:#94a3b8">暂未发现套利机会</div>'; return; }
+  const stratNames = { complement: '互补套利', probability: '概率偏差', market_making: '做市', momentum: '动量', logical: '逻辑套利' };
+  const stratColors = { complement: '#22c55e', probability: '#8b5cf6', market_making: '#5b6ef5', momentum: '#f59e0b', logical: '#ec4899' };
+  c.innerHTML = opps.map(function(o) {
+    const sn = stratNames[o.strategy] || o.strategy;
+    const sc = stratColors[o.strategy] || '#5b6ef5';
+    const profit = (o.profit || 0).toFixed(2);
+    const profitColor = o.profit > 0 ? '#22c55e' : '#94a3b8';
+    return '<div class="opp-card" style="border-left-color:' + sc + '">'
+      + '<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px">'
+      + '<div style="flex:1;min-width:0">'
+      + '<div style="font-size:13px;font-weight:600;color:' + sc + ';margin-bottom:2px">[' + sn + '] ' + (o.action || '') + '</div>'
+      + '<div style="font-size:12px;color:#cbd5e1;margin-bottom:4px">' + (o.market || '').slice(0, 80) + '</div>'
+      + (o.advisory ? '<div style="font-size:11px;color:#94a3b8;font-style:italic">' + o.advisory + '</div>' : '')
+      + '</div>'
+      + '<div style="text-align:right;flex-shrink:0">'
+      + '<div style="font-size:16px;font-weight:700;color:' + profitColor + '">+$' + profit + '</div>'
+      + '<div style="font-size:10px;color:#64748b">价差 ' + ((o.spread || 0) * 100).toFixed(1) + '%</div>'
+      + '<div style="font-size:10px;color:#64748b">信心 ' + ((o.confidence || 0) * 100).toFixed(0) + '%</div>'
+      + '</div></div></div>';
+  }).join('');
+}
 
 // Log
 function addLog(m, t) { const f = document.getElementById('logFeed'), d = document.createElement('div'); d.className = 'log-entry ' + (t || 'info'); d.innerHTML = '<span class="time">[' + new Date().toLocaleTimeString() + ']</span> ' + m; f.appendChild(d); f.scrollTop = f.scrollHeight; while (f.children.length > 200) f.removeChild(f.firstChild); }
@@ -546,7 +577,7 @@ async function loadStatus() {
     }
   } catch { addLog('后端连接失败', 'error'); }
 }
-async function init() { await loadStatus(); await loadMarkets(); await loadGroups(); await loadRisk(); await loadTrades(); await loadAlerts(); await loadModeAndStrategies(); loadAdvisory(); checkApi(); setInterval(loadMarketPrices, 300000); setInterval(loadTrades, 30000); setInterval(loadAlerts, 15000); setInterval(checkApi, 60000); }
+async function init() { await loadStatus(); await loadMarkets(); await loadGroups(); await loadRisk(); await loadTrades(); await loadAlerts(); await loadModeAndStrategies(); loadAdvisory(); loadOpportunities(); checkApi(); setInterval(loadMarketPrices, 300000); setInterval(loadTrades, 30000); setInterval(loadAlerts, 15000); setInterval(checkApi, 60000); setInterval(loadOpportunities, 60000); setInterval(loadStatus, 60000); }
 init();
 </script>
 </body>
