@@ -506,19 +506,23 @@ async function runScan(env: Env) {
   // Risk controls
   const maxPosition = parseFloat(await getSetting(db, 'MAX_POSITION_SIZE_USD', '50'));
   const dailyLossLimit = parseFloat(await getSetting(db, 'DAILY_LOSS_LIMIT_USD', '20'));
-  const dailyPnl = parseFloat(await getState(db, 'daily_pnl') || '0');
 
-  // Calculate current open position (total paper/real trades not yet settled)
-  const openPositionRes = await db.prepare("SELECT COALESCE(SUM(amount_usd),0) as total FROM trades WHERE side='BUY' AND status IN ('filled','submitted')").first<{total:number}>();
-  const currentPosition = openPositionRes?.total || 0;
+  // Calculate current NET open position (BUY - SELL, today's trades only matter for daily loss)
+  const positionRes = await db.prepare("SELECT COALESCE(SUM(CASE WHEN side='BUY' THEN amount_usd ELSE -amount_usd END), 0) as net FROM trades WHERE status IN ('filled','submitted')").first<{net:number}>();
+  const currentPosition = Math.max(0, positionRes?.net || 0);
 
-  // Filter: only real arbitrage (has legs with both buy+sell, or single leg within budget)
+  // Calculate today's realized P&L (sum of net cash flow from today's trades)
+  const todayPnlRes = await db.prepare("SELECT COALESCE(SUM(CASE WHEN side='SELL' THEN amount_usd ELSE -amount_usd END), 0) as pnl FROM trades WHERE status IN ('filled','submitted') AND date(created_at)=date('now')").first<{pnl:number}>();
+  const dailyPnl = todayPnlRes?.pnl || 0;
+  await setState(db, 'daily_pnl', dailyPnl.toString());
+
+  // Filter: only real arbitrage with valid legs and within risk limits
   const tradableOpps = opps.filter(o => {
-    if (!o.legs || o.legs.length === 0) return false; // Advisory-only (probability)
+    if (!o.legs || o.legs.length === 0) return false;
     if (o.profit < 0.10 || o.profit > tradeSize * 2) return false;
-    const totalLegCost = o.legs.reduce((s: number, l: any) => s + l.price * l.size, 0);
-    if (totalLegCost > tradeSize * 2) return false;
-    if (currentPosition + totalLegCost > maxPosition) return false; // Would exceed max position
+    const totalLegCost = o.legs.reduce((s: number, l: any) => l.side === 'BUY' ? s + l.price * l.size : s, 0);
+    if (totalLegCost > tradeSize) return false; // Hard cap: cost <= single trade limit
+    if (currentPosition + totalLegCost > maxPosition) return false;
     return true;
   });
 
@@ -651,12 +655,12 @@ async function executeTrade(env: Env, db: D1Database, opp: any, mode: string) {
     results.push({ side: leg.side, price: leg.price, status, orderId });
   }
 
-  // Update P&L
-  const pnlDelta = mode === 'paper' ? opp.profit : 0;
-  const dailyPnl = parseFloat(await getState(db, 'daily_pnl') || '0') + pnlDelta;
-  const totalPnl = parseFloat(await getState(db, 'total_pnl') || '0') + pnlDelta;
-  await setState(db, 'daily_pnl', dailyPnl.toString());
-  await setState(db, 'total_pnl', totalPnl.toString());
+  // Update total expected P&L (running tally of expected profits)
+  // Note: daily_pnl is now calculated from realized trade flows in runScan
+  if (mode === 'paper') {
+    const totalPnl = parseFloat(await getState(db, 'total_pnl') || '0') + (opp.profit || 0);
+    await setState(db, 'total_pnl', totalPnl.toString());
+  }
 
   return { strategy: opp.strategy, market: opp.market, mode, profit: opp.profit, orders: results };
 }
