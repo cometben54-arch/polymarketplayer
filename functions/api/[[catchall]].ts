@@ -577,17 +577,15 @@ async function runScan(env: Env) {
     }
   }
 
-  // Log summary (include advisory-only opps for info)
+  // Always log scan summary so user knows system is alive
   const stratNames: Record<string,string> = { complement: '互补套利', probability: '概率偏差', market_making: '做市', momentum: '动量', logical: '逻辑套利' };
-  if (tradableOpps.length > 0 || opps.length > 0) {
-    const tradeableSummary = tradableOpps.map(o => `[${stratNames[o.strategy] || o.strategy}] ${o.market?.slice(0,20)} $${o.profit.toFixed(2)}`).join('; ');
-    const advisorySummary = opps.filter(o => !o.legs?.length).map(o => `[${stratNames[o.strategy] || o.strategy}] ${o.market?.slice(0,20)} ${o.advisory || ''}`).join('; ');
-    await addAlert(db, 'info',
-      `扫描${mkts.length}市场 | 持仓$${currentPosition.toFixed(0)}/$${maxPosition}`
-      + (tradableOpps.length ? ` | 可交易${tradableOpps.length}个: ${tradeableSummary}` : ' | 无可交易机会')
-      + (traded ? ` | 已${mode === 'paper' ? '模拟' : '真实'}交易[${stratNames[traded.strategy] || traded.strategy}]` : '')
-      + (advisorySummary ? ` | 参考: ${advisorySummary}` : ''));
-  }
+  const tradeableSummary = tradableOpps.map(o => `[${stratNames[o.strategy] || o.strategy}] ${o.market?.slice(0,20)} $${o.profit.toFixed(2)}`).join('; ');
+  const advisorySummary = opps.filter(o => !o.legs?.length).map(o => `[${stratNames[o.strategy] || o.strategy}] ${o.market?.slice(0,20)} ${o.advisory || ''}`).join('; ');
+  await addAlert(db, 'info',
+    `扫描${mkts.length}市场 | 余额$${balance.toFixed(2)} | 持仓$${currentPosition.toFixed(0)}/$${maxPosition} | 模式:${mode}`
+    + (tradableOpps.length ? ` | 可交易${tradableOpps.length}个: ${tradeableSummary}` : ' | 无可交易机会')
+    + (traded ? ` | 已${mode === 'paper' ? '模拟' : '真实'}交易[${stratNames[traded.strategy] || traded.strategy}]` : '')
+    + (advisorySummary ? ` | 参考: ${advisorySummary}` : ''));
 
   const result = { scanned: mkts.length, mode, balance: Math.round(balance * 100) / 100, strategies: enabled,
     opportunities: opps.map(o => ({ strategy: o.strategy, market: o.market, action: o.action,
