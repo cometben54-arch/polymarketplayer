@@ -1088,6 +1088,43 @@ app.get('/debug/balance', async c => {
   });
 });
 
+// Debug: test if Polymarket CLOB is reachable + check for geo-blocking
+app.get('/debug/geo', async c => {
+  const result: any = {};
+  try {
+    const r = await fetch(`${CLOB(c.env)}/markets`, {
+      headers: { 'CF-IPCountry': 'US', 'X-Forwarded-For': '8.8.8.8' }
+    });
+    result.markets_status = r.status;
+    result.markets_body_preview = (await r.text()).slice(0, 300);
+    result.cf_ray = r.headers.get('cf-ray');
+    result.server = r.headers.get('server');
+  } catch (e: any) { result.markets_error = e.message; }
+
+  // Try a real authenticated call
+  try {
+    const path = '/auth/api-keys';
+    const h = await authHeaders(c.env, 'GET', path);
+    const r = await fetch(`${CLOB(c.env)}${path}`, { headers: h });
+    result.auth_status = r.status;
+    result.auth_body = (await r.text()).slice(0, 500);
+  } catch (e: any) { result.auth_error = e.message; }
+
+  // Check our outgoing IP
+  try {
+    const r = await fetch('https://api.ipify.org?format=json');
+    if (r.ok) result.outgoing_ip = await r.json();
+  } catch {}
+
+  // Check Cloudflare colo
+  try {
+    const r = await fetch('https://cloudflare.com/cdn-cgi/trace');
+    if (r.ok) result.cf_trace = (await r.text()).split('\n').slice(0, 8).join(' | ');
+  } catch {}
+
+  return c.json(result);
+});
+
 // Manual trade: place a single order (for testing)
 app.post('/trade', async c => {
   const { token_id, price, size, side } = await c.req.json<{ token_id: string; price: number; size: number; side: string }>();
