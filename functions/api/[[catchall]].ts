@@ -52,15 +52,50 @@ async function getMidpoint(env: Env, tid: string): Promise<number | null> { cons
 async function getOrderbook(env: Env, tid: string): Promise<any> { return clobGet(env, `/book?token_id=${tid}`); }
 
 // --- Account / Position helpers ---
+// Query USDC balance directly from Polygon RPC (most reliable)
 async function getAccountBalance(env: Env): Promise<number> {
-  // Fetch USDC balance via Data API
   const addr = env.POLYMARKET_FUNDER_ADDRESS;
   if (!addr) return 0;
+
+  // USDC.e contract on Polygon (used by Polymarket)
+  const USDC_ADDR = '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174';
+  // ERC20 balanceOf(address) function selector + padded address
+  const data = '0x70a08231' + addr.replace('0x', '').toLowerCase().padStart(64, '0');
+
+  // Try multiple public Polygon RPCs for reliability
+  const rpcs = [
+    'https://polygon-rpc.com',
+    'https://rpc-mainnet.matic.network',
+    'https://polygon-bor-rpc.publicnode.com',
+  ];
+
+  for (const rpc of rpcs) {
+    try {
+      const res = await fetch(rpc, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          jsonrpc: '2.0', id: 1, method: 'eth_call',
+          params: [{ to: USDC_ADDR, data }, 'latest'],
+        }),
+      });
+      if (!res.ok) continue;
+      const json: any = await res.json();
+      if (json.result) {
+        // USDC has 6 decimals
+        const bigInt = BigInt(json.result);
+        return Number(bigInt) / 1e6;
+      }
+    } catch {}
+  }
+
+  // Fallback: try Polymarket Data API
   try {
     const dataUrl = (env.DATA_API_URL || 'https://data-api.polymarket.com').replace(/\/$/, '');
     const res = await fetch(`${dataUrl}/value?user=${addr}`);
     if (res.ok) { const d: any = await res.json(); return parseFloat(d.value || '0'); }
   } catch {}
+
   return 0;
 }
 
@@ -1040,6 +1075,17 @@ app.post('/scan', async c => c.json(await runScan(c.env)));
 app.get('/scan/latest', async c => {
   const cached = await getState(c.env.DB, 'last_scan_result');
   return c.json(cached ? JSON.parse(cached) : { opportunities: [], scanned_at: null });
+});
+app.get('/debug/balance', async c => {
+  const balance = await getAccountBalance(c.env);
+  const startingCash = parseFloat(await getSetting(c.env.DB, 'STARTING_CASH', '100'));
+  const paperBalance = await getPaperBalance(c.env.DB, startingCash);
+  return c.json({
+    funder_address: c.env.POLYMARKET_FUNDER_ADDRESS,
+    real_usdc_balance: balance,
+    paper_balance: paperBalance,
+    starting_cash: startingCash,
+  });
 });
 
 // Manual trade: place a single order (for testing)
