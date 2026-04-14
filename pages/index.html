@@ -203,7 +203,18 @@ async function loadMarkets() {
   const t = document.getElementById('marketsTable'), e = document.getElementById('noMarkets');
   if (!markets.length) { t.innerHTML = ''; e.style.display = ''; document.getElementById('statMarkets').textContent = '0'; return; }
   e.style.display = 'none'; document.getElementById('statMarkets').textContent = markets.length;
-  t.innerHTML = markets.map(m => '<tr><td title="' + m.condition_id + '" style="max-width:200px">' + m.question + '<div style="font-size:11px;color:#64748b">' + (m.topic || '') + '</div></td><td id="py_' + m.condition_id.slice(0,10) + '" style="color:#22c55e">...</td><td id="pn_' + m.condition_id.slice(0,10) + '" style="color:#ef4444">...</td><td><div style="display:flex;align-items:center;gap:4px"><input type="number" min="0" max="100" value="' + Math.round((m.user_conviction || 0.5) * 100) + '" style="width:50px;padding:2px 4px;background:#252840;border:1px solid #334155;border-radius:4px;color:#e2e8f0;font-size:12px;text-align:center" onchange="updateConviction(\'' + m.condition_id + '\',this.value)"><span style="font-size:11px">%</span></div></td><td><button class="btn btn-danger btn-sm" onclick="removeMarket(\'' + m.condition_id + '\')">删除</button></td></tr>').join('');
+  t.innerHTML = markets.map(function(m) {
+    return '<tr><td title="' + m.condition_id + '" style="max-width:240px">'
+      + getFeeBadge(m.topic)
+      + '<span>' + m.question + '</span>'
+      + '<div style="font-size:11px;color:#64748b">' + (m.topic || '') + '</div></td>'
+      + '<td id="py_' + m.condition_id.slice(0,10) + '" style="color:#22c55e">...</td>'
+      + '<td id="pn_' + m.condition_id.slice(0,10) + '" style="color:#ef4444">...</td>'
+      + '<td><div style="display:flex;align-items:center;gap:4px">'
+      + '<input type="number" min="0" max="100" value="' + Math.round((m.user_conviction || 0.5) * 100) + '" style="width:50px;padding:2px 4px;background:#252840;border:1px solid #334155;border-radius:4px;color:#e2e8f0;font-size:12px;text-align:center" onchange="updateConviction(\'' + m.condition_id + '\',this.value)">'
+      + '<span style="font-size:11px">%</span></div></td>'
+      + '<td><button class="btn btn-danger btn-sm" onclick="removeMarket(\'' + m.condition_id + '\')">删除</button></td></tr>';
+  }).join('');
   // Fetch live prices
   loadMarketPrices();
 }
@@ -248,7 +259,8 @@ async function resolveMarketUrl() {
 async function addResolvedMarket(idx) {
   const m = _resolvedMarkets[idx];
   if (!m || !m.condition_id) { alert('缺少 Condition ID'); return; }
-  const topic = document.getElementById('marketTopic').value;
+  // Use topic from API if available, otherwise from dropdown
+  const topic = m.topic || document.getElementById('marketTopic').value;
   const conviction = parseInt(document.getElementById('marketConviction').value) / 100;
   await api('/markets', 'POST', { condition_id: m.condition_id, question: m.question || '', token_yes: m.token_yes || null, token_no: m.token_no || null, topic, user_conviction: conviction });
   var btn = document.querySelectorAll('#resolvedMarkets .btn-success')[idx];
@@ -257,6 +269,33 @@ async function addResolvedMarket(idx) {
 }
 async function addMarketManual() { const c = document.getElementById('marketConditionId').value.trim(), q = document.getElementById('marketQuestion').value.trim(); if (!c || !q) { alert('请填写ID和问题'); return; } await api('/markets', 'POST', { condition_id: c, question: q, token_yes: document.getElementById('marketTokenYes').value.trim() || null, token_no: document.getElementById('marketTokenNo').value.trim() || null }); closeModal('addMarket'); loadMarkets(); }
 async function removeMarket(id) { if (!confirm('确定？')) return; await api('/markets/' + id, 'DELETE'); loadMarkets(); }
+// Polymarket category fees (mirror of backend CATEGORY_FEES)
+const CATEGORY_FEES = {
+  geopolitics: 0, sports: 0.0075, politics: 0.01, finance: 0.01, tech: 0.01,
+  culture: 0.0125, weather: 0.0125, economics: 0.015, mentions: 0.0156, crypto: 0.018, other: 0.0125
+};
+function getFeeRate(topic) {
+  if (!topic) return 0.0125;
+  const t = String(topic).toLowerCase().trim();
+  if (t.includes('geopolit') || t === 'world' || t === 'world-events') return 0;
+  if (t.includes('sport')) return 0.0075;
+  if (t.includes('politic')) return 0.01;
+  if (t.includes('financ') || t.includes('stock')) return 0.01;
+  if (t.includes('tech') || t.includes('ai')) return 0.01;
+  if (t.includes('cultur') || t.includes('entertain')) return 0.0125;
+  if (t.includes('weather') || t.includes('climate')) return 0.0125;
+  if (t.includes('econom')) return 0.015;
+  if (t.includes('crypto') || t.includes('bitcoin') || t.includes('ethereum')) return 0.018;
+  return CATEGORY_FEES[t] != null ? CATEGORY_FEES[t] : 0.0125;
+}
+function getFeeBadge(topic) {
+  const fee = getFeeRate(topic);
+  if (fee === 0) {
+    return '<span style="display:inline-block;background:#22c55e;color:#fff;font-size:9px;font-weight:700;padding:2px 6px;border-radius:4px;margin-right:6px;vertical-align:middle">免手续费</span>';
+  }
+  return '<span style="display:inline-block;background:#334155;color:#fbbf24;font-size:9px;font-weight:600;padding:2px 6px;border-radius:4px;margin-right:6px;vertical-align:middle">' + (fee * 100).toFixed(2) + '%</span>';
+}
+
 async function loadHotMarkets() {
   openModal('hotMarkets');
   const status = document.getElementById('hotMarketsStatus');
@@ -274,7 +313,7 @@ async function loadHotMarkets() {
       const reasons = (m.reasons || []).map(function(r) { return '<span style="background:rgba(91,110,245,0.2);color:#93c5fd;font-size:11px;padding:2px 8px;border-radius:10px;margin-right:4px">' + r + '</span>'; }).join('');
       return '<div style="background:#1e293b;border-radius:8px;padding:12px;margin-bottom:8px;border-left:3px solid ' + scoreColor + '">'
         + '<div style="display:flex;justify-content:space-between;align-items:start;gap:8px;margin-bottom:6px">'
-        + '<div style="flex:1;font-size:14px;font-weight:600">' + (i + 1) + '. ' + (m.question || '') + '</div>'
+        + '<div style="flex:1;font-size:14px;font-weight:600">' + (i + 1) + '. ' + getFeeBadge(m.category) + (m.question || '') + '</div>'
         + '<div style="flex-shrink:0;font-size:18px;font-weight:800;color:' + scoreColor + '">' + m.score + '</div>'
         + '</div>'
         + '<div style="font-size:11px;color:#94a3b8;margin-bottom:4px">' + (m.category || '') + ' | YES: ' + (m.price_yes * 100).toFixed(1) + '¢ | NO: ' + (m.price_no * 100).toFixed(1) + '¢ | 24h量: $' + (m.volume_24h / 1000).toFixed(1) + 'K</div>'

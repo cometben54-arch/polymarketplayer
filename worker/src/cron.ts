@@ -7,6 +7,7 @@
  * - Every hour (minute 0): POST /api/ai-review { type: "hourly" }
  * - Daily at 1:00 AM UTC: POST /api/ai-review { type: "daily" }
  * - Daily at 2:00 AM UTC: POST /api/ai-advisory (investment advice)
+ * - Weekly Mondays at 3:00 AM UTC: POST /api/fees/verify (verify Polymarket fee schedule)
  */
 
 interface Env {
@@ -59,6 +60,16 @@ export default {
           .then(r => r.json())
           .then(d => console.log('Advisory generated:', JSON.stringify(d).slice(0, 500)))
           .catch(e => console.error('Advisory failed:', e.message))
+      );
+    }
+
+    // Weekly Mondays at 3:00 AM UTC: verify Polymarket fee schedule
+    if (cronPattern === '0 3 * * 1') {
+      ctx.waitUntil(
+        fetch(`${baseUrl}/api/fees/verify`, { method: 'POST', headers })
+          .then(r => r.json())
+          .then(d => console.log('Fee verification:', JSON.stringify(d).slice(0, 500)))
+          .catch(e => console.error('Fee verify failed:', e.message))
       );
     }
   },

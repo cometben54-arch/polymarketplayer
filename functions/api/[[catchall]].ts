@@ -133,8 +133,43 @@ async function setState(db: D1Database, k: string, v: string) { await db.prepare
 async function getSetting(db: D1Database, k: string, fb = ''): Promise<string> { const r = await db.prepare('SELECT value FROM settings WHERE key=?').bind(k).first<{value:string}>(); return r?.value || fb; }
 async function addAlert(db: D1Database, level: string, msg: string) { await db.prepare('INSERT INTO alerts(level,message) VALUES(?,?)').bind(level, msg).run(); }
 
-// Polymarket taker fee: 2% (0.02) per side
-const TAKER_FEE = 0.02;
+// Polymarket taker fees by category
+// LAST VERIFIED: 2026-04-13 from help.polymarket.com/articles/13364478
+// TODO: Re-verify weekly - fees can change. Sources:
+//   - https://help.polymarket.com/en/articles/13364478-trading-fees
+//   - https://docs.polymarket.com/trading/fees
+// Makers pay 0%, takers pay by category. Geopolitics is fee-free.
+const CATEGORY_FEES: Record<string, number> = {
+  geopolitics: 0.0000,  // 0.00% - fee-free!
+  sports: 0.0075,       // 0.75%
+  politics: 0.0100,     // 1.00%
+  finance: 0.0100,      // 1.00%
+  tech: 0.0100,         // 1.00%
+  culture: 0.0125,      // 1.25%
+  weather: 0.0125,      // 1.25%
+  economics: 0.0150,    // 1.50%
+  mentions: 0.0156,     // 1.56%
+  crypto: 0.0180,       // 1.80%
+  other: 0.0125,        // default 1.25%
+};
+const FEES_LAST_VERIFIED = '2026-04-13';
+const DEFAULT_FEE = 0.0125;
+
+function getFeeForCategory(topic: string | undefined): number {
+  if (!topic) return DEFAULT_FEE;
+  const t = topic.toLowerCase().trim();
+  // Aliases
+  if (t.includes('geopolit') || t === 'world' || t === 'world-events') return 0;
+  if (t.includes('sport')) return CATEGORY_FEES.sports;
+  if (t.includes('politic')) return CATEGORY_FEES.politics;
+  if (t.includes('financ') || t.includes('stock')) return CATEGORY_FEES.finance;
+  if (t.includes('tech') || t.includes('ai')) return CATEGORY_FEES.tech;
+  if (t.includes('cultur') || t.includes('entertain')) return CATEGORY_FEES.culture;
+  if (t.includes('weather') || t.includes('climate')) return CATEGORY_FEES.weather;
+  if (t.includes('econom')) return CATEGORY_FEES.economics;
+  if (t.includes('crypto') || t.includes('bitcoin') || t.includes('ethereum')) return CATEGORY_FEES.crypto;
+  return CATEGORY_FEES[t] ?? DEFAULT_FEE;
+}
 
 // =============================================
 // STRATEGY 1: Complement Arbitrage (Dutch Book)
@@ -145,21 +180,23 @@ async function strategyComplement(env: Env, m: any, minSpread: number, tradeSize
   const [pY, pN] = await Promise.all([getPrice(env, m.token_yes, 'BUY'), getPrice(env, m.token_no, 'BUY')]);
   if (pY === null || pN === null) return null;
   if (pY < 0.03 || pN < 0.03) return null; // Skip extreme prices
+  const fee = getFeeForCategory(m.topic);
   const totalCost = pY + pN;
-  const fees = totalCost * TAKER_FEE * 2;
+  const fees = totalCost * fee * 2; // fees on both legs
   const netProfit = 1 - totalCost - fees;
   if (netProfit > minSpread) {
-    const sh = Math.min(tradeSize / totalCost, 100); // Cap 100 shares
+    const sh = Math.min(tradeSize / totalCost, 100);
     const profit = sh * netProfit;
-    if (profit > tradeSize) return null; // Sanity: profit can't exceed trade size
+    if (profit > tradeSize) return null;
     return { strategy: 'complement', action: 'BUY_BOTH', spread: netProfit, profit, confidence: Math.min(netProfit / 0.05, 1),
+      fee_rate: fee,
       legs: [{ token: m.token_yes, side: 'BUY', price: pY, size: sh }, { token: m.token_no, side: 'BUY', price: pN, size: sh }] };
   }
   const [bY, bN] = await Promise.all([getPrice(env, m.token_yes, 'SELL'), getPrice(env, m.token_no, 'SELL')]);
   if (bY !== null && bN !== null) {
     if (bY < 0.03 || bN < 0.03) return null;
     const totalBid = bY + bN;
-    const feesS = totalBid * TAKER_FEE * 2;
+    const feesS = totalBid * fee * 2;
     const netProfitS = totalBid - 1 - feesS;
     if (netProfitS > minSpread) {
       const sh = Math.min(tradeSize / totalBid, 100);
@@ -281,32 +318,31 @@ reasoning: 核心理由`;
   const dollarBet = Math.min(tradeSize * kelly * 4, balance * 0.08);
   if (dollarBet < 0.50) return null;
 
+  const feeRate = getFeeForCategory(m.topic);
   if (deviation > 0) {
-    // AI thinks YES is underpriced → BUY YES
     const price = await getPrice(env, m.token_yes, 'BUY');
     if (price === null || price < 0.05 || price > 0.95) return null;
     if (balance < dollarBet) return null;
     const size = Math.min(dollarBet / price, 100);
-    const fee = size * price * TAKER_FEE;
+    const fee = size * price * feeRate;
     const expectedProfit = size * Math.abs(deviation) - fee;
     if (expectedProfit < 0.10) return null;
     return { strategy: 'probability', action: 'BUY_YES_AI', spread: Math.abs(deviation), profit: expectedProfit,
-      confidence: Math.min(Math.abs(deviation) / 0.2, 1),
+      confidence: Math.min(Math.abs(deviation) / 0.2, 1), fee_rate: feeRate,
       advisory: `AI估计${(aiProb*100).toFixed(0)}% > 市场${(marketPrice*100).toFixed(0)}% | ${aiReasoning}`,
       legs: [{ token: m.token_yes, side: 'BUY', price, size }] };
   } else {
-    // AI thinks YES is overpriced → only SELL if we hold
     const position = mode === 'paper' ? await getPaperPosition(db, m.token_yes) : await getTokenPosition(env, m.token_yes);
     if (position < 1) return null;
     const price = await getPrice(env, m.token_yes, 'SELL');
     if (price === null || price < 0.05) return null;
     const size = Math.min(position, 100, dollarBet / price);
     if (size < 1) return null;
-    const fee = size * price * TAKER_FEE;
+    const fee = size * price * feeRate;
     const expectedProfit = size * Math.abs(deviation) - fee;
     if (expectedProfit < 0.10) return null;
     return { strategy: 'probability', action: 'SELL_YES_AI', spread: Math.abs(deviation), profit: expectedProfit,
-      confidence: Math.min(Math.abs(deviation) / 0.2, 1),
+      confidence: Math.min(Math.abs(deviation) / 0.2, 1), fee_rate: feeRate,
       advisory: `AI估计${(aiProb*100).toFixed(0)}% < 市场${(marketPrice*100).toFixed(0)}% | ${aiReasoning}`,
       legs: [{ token: m.token_yes, side: 'SELL', price, size }] };
   }
@@ -327,7 +363,7 @@ async function _strategyProbabilityLegacy(env: Env, m: any, db: D1Database, trad
     if (price === null || price < 0.03 || price > 0.97) return null;
     if (balance < dollarBet) return null;
     const size = Math.min(dollarBet / price, 100);
-    const fee = size * price * TAKER_FEE;
+    const fee = size * price * getFeeForCategory(m.topic);
     const expectedProfit = size * Math.abs(deviation) - fee;
     if (expectedProfit < 0.10) return null;
     return { strategy: 'probability', action: 'BUY_YES', spread: Math.abs(deviation), profit: expectedProfit,
@@ -341,7 +377,7 @@ async function _strategyProbabilityLegacy(env: Env, m: any, db: D1Database, trad
     if (price === null || price < 0.03) return null;
     const size = Math.min(position, 100, dollarBet / price);
     if (size < 1) return null;
-    const fee = size * price * TAKER_FEE;
+    const fee = size * price * getFeeForCategory(m.topic);
     const expectedProfit = size * Math.abs(deviation) - fee;
     if (expectedProfit < 0.10) return null;
     return { strategy: 'probability', action: 'SELL_YES', spread: Math.abs(deviation), profit: expectedProfit,
@@ -378,13 +414,14 @@ async function strategyMarketMaking(env: Env, m: any, tradeSize: number): Promis
   const cost = size * buyPrice;
   // Both legs must be within tradeSize
   if (cost > tradeSize * 1.1 || revenue > tradeSize * 3) return null;
-  const feeBuy = cost * TAKER_FEE;
-  const feeSell = revenue * TAKER_FEE;
+  const feeRate = getFeeForCategory(m.topic);
+  const feeBuy = cost * feeRate;
+  const feeSell = revenue * feeRate;
   const profit = revenue - cost - feeBuy - feeSell;
 
   if (profit < 0.10) return null;
 
-  return { strategy: 'market_making', action: 'MAKE_MARKET', spread: netSpread, profit,
+  return { strategy: 'market_making', action: 'MAKE_MARKET', spread: netSpread, profit, fee_rate: feeRate,
     confidence: Math.min(netSpread / 0.06, 1), midPrice: (bestBid + bestAsk) / 2,
     legs: [{ token: m.token_yes, side: 'BUY', price: buyPrice, size }, { token: m.token_yes, side: 'SELL', price: sellPrice, size }] };
 }
@@ -414,7 +451,7 @@ async function strategyMomentum(env: Env, m: any, db: D1Database, tradeSize: num
     if (price === null || price < 0.03 || price > 0.97) return null;
     if (balance < dollarBet) return null;
     const size = Math.min(dollarBet / price, 100);
-    const fee = size * price * TAKER_FEE;
+    const fee = size * price * getFeeForCategory(m.topic);
     const expectedProfit = size * pctChange * price - fee;
     if (expectedProfit < 0.10) return null;
     return { strategy: 'momentum', action: 'BUY_MOMENTUM', spread: pctChange, profit: expectedProfit,
@@ -429,7 +466,7 @@ async function strategyMomentum(env: Env, m: any, db: D1Database, tradeSize: num
     if (price === null || price < 0.03) return null;
     const size = Math.min(position, 100, dollarBet / price);
     if (size < 1) return null;
-    const fee = size * price * TAKER_FEE;
+    const fee = size * price * getFeeForCategory(m.topic);
     const expectedProfit = size * pctChange * price - fee;
     if (expectedProfit < 0.10) return null;
     return { strategy: 'momentum', action: 'SELL_MOMENTUM', spread: pctChange, profit: expectedProfit,
@@ -512,7 +549,8 @@ async function strategyLogical(env: Env, allMarkets: any[], db: D1Database, trad
         if (balance < dollarBet) continue;
         if (buyMarket.price_yes < 0.03 || buyMarket.price_yes > 0.97) continue;
         const size = Math.min(dollarBet / buyMarket.price_yes, 100);
-        const fee = size * buyMarket.price_yes * TAKER_FEE;
+        const feeRate = getFeeForCategory(buyMarket.topic);
+        const fee = size * buyMarket.price_yes * feeRate;
         const netProfit = size * spread - fee;
         if (netProfit < 0.10) continue;
 
@@ -601,7 +639,8 @@ ${priced.map((m, i) => `${i + 1}. "${m.question}" → YES价格: ${(m.price * 10
       if (dollarBet < 0.50 || balance < dollarBet) continue;
       if (buy.price < 0.03 || buy.price > 0.97) continue;
       const size = Math.min(dollarBet / buy.price, 100);
-      const fee = size * buy.price * TAKER_FEE;
+      const feeRate = getFeeForCategory(buy.topic);
+      const fee = size * buy.price * feeRate;
       const netProfit = size * spread - fee;
       if (netProfit < 0.10) continue;
 
@@ -1143,10 +1182,13 @@ app.post('/markets/resolve-url', async c => {
     const evtRes = await fetch(`${GAMMA(c.env)}/events?slug=${slug}`);
     if (evtRes.ok) { const events: any[] = await evtRes.json();
       if (events.length > 0 && events[0].markets) {
-        return c.json({ event: events[0].title, slug, markets: events[0].markets.map((m: any) => {
+        const ev = events[0];
+        const eventCategory = (ev.category || ev.tag || (ev.tags?.[0]?.label) || '').toLowerCase();
+        return c.json({ event: ev.title, slug, markets: ev.markets.map((m: any) => {
           const [tY, tN] = parseClobTokens(m.clobTokenIds);
-          return { condition_id: m.conditionId || m.condition_id || '', question: m.question || m.groupItemTitle || events[0].title || '',
-            token_yes: tY, token_no: tN, slug: m.slug || slug };
+          const topic = (m.category || m.tag || eventCategory || 'other').toLowerCase();
+          return { condition_id: m.conditionId || m.condition_id || '', question: m.question || m.groupItemTitle || ev.title || '',
+            token_yes: tY, token_no: tN, slug: m.slug || slug, topic };
         }) });
       }
     }
@@ -1227,35 +1269,43 @@ app.post('/markets/fix-tokens', async c => {
   const mkts = (await c.env.DB.prepare('SELECT * FROM watched_markets WHERE active=1').all()).results as any[];
   const fixed: string[] = [];
   for (const m of mkts) {
-    if (m.token_yes && m.token_yes.length > 10 && m.token_no && m.token_no.length > 10) continue; // already valid
+    let needsTokens = !m.token_yes || m.token_yes.length < 10 || !m.token_no || m.token_no.length < 10;
+    let needsTopic = !m.topic || m.topic === 'other' || m.topic === '';
+    if (!needsTokens && !needsTopic) continue;
     try {
-      // Try CLOB API first
+      // Try Gamma API first (has both tokens AND category)
+      const gamma = await fetch(`${GAMMA(c.env)}/markets?condition_ids=${m.condition_id}`);
+      if (gamma.ok) {
+        const gm: any[] = await gamma.json();
+        if (gm.length > 0) {
+          const g = gm[0];
+          const [tY, tN] = parseClobTokens(g.clobTokenIds);
+          const topic = (g.category || g.tag || '').toLowerCase() || 'other';
+          if (tY && tN) {
+            await c.env.DB.prepare('UPDATE watched_markets SET token_yes=?, token_no=?, topic=? WHERE condition_id=?').bind(tY, tN, topic, m.condition_id).run();
+            fixed.push(m.question.slice(0, 30) + ': OK [' + topic + ']');
+            continue;
+          } else if (topic) {
+            // Update at least the topic
+            await c.env.DB.prepare('UPDATE watched_markets SET topic=? WHERE condition_id=?').bind(topic, m.condition_id).run();
+          }
+        }
+      }
+      // Fallback: CLOB API for tokens only
       const clob: any = await clobGet(c.env, `/markets/${m.condition_id}`);
       if (clob && clob.tokens) {
         const tokens = clob.tokens;
         const yes = tokens.find((t: any) => t.outcome === 'Yes')?.token_id || tokens[0]?.token_id || '';
         const no = tokens.find((t: any) => t.outcome === 'No')?.token_id || tokens[1]?.token_id || '';
+        const topic = (clob.category || clob.tag || '').toLowerCase() || 'other';
         if (yes && no) {
-          await c.env.DB.prepare('UPDATE watched_markets SET token_yes=?, token_no=? WHERE condition_id=?').bind(yes, no, m.condition_id).run();
-          fixed.push(m.question + ': OK');
+          await c.env.DB.prepare('UPDATE watched_markets SET token_yes=?, token_no=?, topic=? WHERE condition_id=?').bind(yes, no, topic, m.condition_id).run();
+          fixed.push(m.question.slice(0, 30) + ': OK [' + topic + ']');
           continue;
         }
       }
-      // Fallback: Gamma API
-      const gamma = await fetch(`${GAMMA(c.env)}/markets?condition_id=${m.condition_id}`);
-      if (gamma.ok) {
-        const gm: any[] = await gamma.json();
-        if (gm.length > 0) {
-          const [tY, tN] = parseClobTokens(gm[0].clobTokenIds);
-          if (tY && tN) {
-            await c.env.DB.prepare('UPDATE watched_markets SET token_yes=?, token_no=? WHERE condition_id=?').bind(tY, tN, m.condition_id).run();
-            fixed.push(m.question + ': OK (gamma)');
-            continue;
-          }
-        }
-      }
-      fixed.push(m.question + ': FAILED - no tokens found');
-    } catch (e: any) { fixed.push(m.question + ': ERROR - ' + e.message); }
+      fixed.push(m.question.slice(0, 30) + ': FAILED');
+    } catch (e: any) { fixed.push(m.question.slice(0, 30) + ': ERROR - ' + e.message); }
   }
   return c.json({ fixed });
 });
@@ -1289,6 +1339,72 @@ app.post('/scan', async c => c.json(await runScan(c.env)));
 app.get('/scan/latest', async c => {
   const cached = await getState(c.env.DB, 'last_scan_result');
   return c.json(cached ? JSON.parse(cached) : { opportunities: [], scanned_at: null });
+});
+app.get('/fees', async c => c.json({ categories: CATEGORY_FEES, default: DEFAULT_FEE, last_verified: FEES_LAST_VERIFIED }));
+
+// Weekly fee verification: ask AI to check if Polymarket fees changed
+app.post('/fees/verify', async c => {
+  const db = c.env.DB;
+  const aiKey = await getSetting(db, 'AI_API_KEY');
+  if (!aiKey) {
+    await addAlert(db, 'warning', '无法验证手续费: AI Key 未配置');
+    return c.json({ error: 'AI not configured' });
+  }
+  const aiProvider = await getSetting(db, 'AI_PROVIDER', 'openai');
+  const aiModel = await getSetting(db, 'AI_MODEL', 'gpt-4o');
+  const aiBaseUrl = await getSetting(db, 'AI_BASE_URL', 'https://api.openai.com/v1');
+
+  const currentFees = JSON.stringify(CATEGORY_FEES, null, 2);
+  const prompt = `请检查 Polymarket 当前的 taker 手续费政策是否还和以下一致 (上次验证: ${FEES_LAST_VERIFIED}):
+
+${currentFees}
+
+请确认每个类别的手续费百分比是否仍然准确。特别确认:
+1. Geopolitics 是否仍是 0% 免手续费
+2. Crypto 是否仍是 1.80%
+3. 是否有新的类别添加
+4. 是否有政策变化
+
+参考来源: help.polymarket.com/articles/13364478-trading-fees, docs.polymarket.com/trading/fees
+
+请用 JSON 格式回复:
+{"unchanged": true/false, "changes": [{"category": "xxx", "old": 0.01, "new": 0.012}], "notes": "..."}`;
+
+  try {
+    let content = '';
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (aiProvider === 'anthropic') {
+      headers['x-api-key'] = aiKey; headers['anthropic-version'] = '2023-06-01';
+      const res = await fetch((aiBaseUrl || 'https://api.anthropic.com') + '/v1/messages', {
+        method: 'POST', headers,
+        body: JSON.stringify({ model: aiModel, max_tokens: 800, messages: [{ role: 'user', content: prompt }] })
+      });
+      const data: any = await res.json(); content = data.content?.[0]?.text || '';
+    } else {
+      headers['Authorization'] = `Bearer ${aiKey}`;
+      const res = await fetch(aiBaseUrl + '/chat/completions', {
+        method: 'POST', headers,
+        body: JSON.stringify({ model: aiModel, max_tokens: 800, messages: [{ role: 'user', content: prompt }] })
+      });
+      const data: any = await res.json(); content = data.choices?.[0]?.message?.content || '';
+    }
+
+    const match = content.match(/\{[\s\S]*\}/);
+    if (match) {
+      const parsed = JSON.parse(match[0]);
+      if (parsed.unchanged === false && parsed.changes?.length) {
+        await addAlert(db, 'critical', `⚠️ Polymarket 手续费可能已变化: ${JSON.stringify(parsed.changes)} | ${parsed.notes || ''}`);
+      } else {
+        await addAlert(db, 'info', `✅ 手续费验证通过 (${FEES_LAST_VERIFIED}): ${parsed.notes || '无变化'}`);
+      }
+      await db.prepare('INSERT INTO ai_reviews(review_type,content) VALUES(?,?)').bind('fee_verify', content).run();
+      return c.json(parsed);
+    }
+    return c.json({ raw: content });
+  } catch (e: any) {
+    await addAlert(db, 'warning', '手续费验证失败: ' + e.message);
+    return c.json({ error: e.message });
+  }
 });
 app.get('/debug/balance', async c => {
   const balance = await getAccountBalance(c.env);
