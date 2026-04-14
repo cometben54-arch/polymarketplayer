@@ -3,7 +3,7 @@ main = "src/cron.ts"
 compatibility_date = "2024-12-01"
 
 [triggers]
-crons = ["* * * * *", "0 * * * *", "0 1 * * *", "0 2 * * *", "0 3 * * 1"]
+crons = ["*/2 * * * *", "0 * * * *", "0 1 * * *", "0 2 * * *", "0 3 * * 1"]
 
 [vars]
 PAGES_URL = "https://polymarketplayer.pages.dev"

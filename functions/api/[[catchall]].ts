@@ -51,6 +51,9 @@ async function getPrice(env: Env, tid: string, side = 'BUY'): Promise<number | n
 async function getMidpoint(env: Env, tid: string): Promise<number | null> { const d: any = await clobGet(env, `/midpoint?token_id=${tid}`); return d?.mid ? parseFloat(d.mid) : null; }
 async function getOrderbook(env: Env, tid: string): Promise<any> { return clobGet(env, `/book?token_id=${tid}`); }
 
+// Sleep helper - used to pace API requests
+function sleep(ms: number): Promise<void> { return new Promise(r => setTimeout(r, ms)); }
+
 // --- Account / Position helpers ---
 // Query USDC balance directly from Polygon RPC (most reliable)
 async function getAccountBalance(env: Env): Promise<number> {
@@ -754,76 +757,82 @@ async function runScanInner(env: Env) {
   const startingCash = parseFloat(await getSetting(db, 'STARTING_CASH', '100'));
   const balance = mode === 'paper' ? await getPaperBalance(db, startingCash) : await getAccountBalance(env);
 
-  // ============= OPTIMIZED PRICE FETCH =============
-  // Use orderbook only (single call per token gives bid+ask+depth).
-  // Cloudflare Workers has 50 subrequest limit - we batch carefully.
-  // Per market: 2 orderbook calls (yes+no) = ~24 calls for 12 markets.
+  // ============= PACED PRICE FETCH =============
+  // Spread API requests over time to avoid rate limiting.
+  // Strategy: 1 market at a time with small delay between markets,
+  // and a longer delay between markets. This keeps avg request rate low.
   const priceCache: Record<string, { mid: number | null; askY: number | null; bidY: number | null; askN: number | null; bidN: number | null; bookY: any }> = {};
 
-  // Process markets in batches of 5 to avoid rate limits
-  const BATCH_SIZE = 5;
-  for (let i = 0; i < mkts.length; i += BATCH_SIZE) {
-    const batch = mkts.slice(i, i + BATCH_SIZE);
-    await Promise.all(batch.map(async (m: any) => {
-      if (!m.token_yes) return;
-      const cache: any = { mid: null, askY: null, bidY: null, askN: null, bidN: null, bookY: null };
-      try {
-        // Single orderbook call gives us bid, ask, mid
-        const bookY = await getOrderbook(env, m.token_yes);
-        if (bookY?.bids?.length && bookY?.asks?.length) {
-          cache.bookY = bookY;
-          cache.bidY = parseFloat(bookY.bids[0].price);
-          cache.askY = parseFloat(bookY.asks[0].price);
-          cache.mid = (cache.bidY + cache.askY) / 2;
-        }
-        if (m.token_no) {
-          const bookN = await getOrderbook(env, m.token_no);
-          if (bookN?.bids?.length && bookN?.asks?.length) {
-            cache.bidN = parseFloat(bookN.bids[0].price);
-            cache.askN = parseFloat(bookN.asks[0].price);
-          }
-        }
-      } catch (e: any) {
-        // Log fetch failure for debugging
-        console.error('Price fetch failed for', m.condition_id, e.message);
+  // Configurable pacing (in milliseconds) - spreads requests across time to avoid bursts
+  const FETCH_PACING_MS = 2000;  // 2s delay between yes/no orderbook calls in same market
+  const MARKET_PACING_MS = 4000; // 4s delay between markets
+
+  for (let i = 0; i < mkts.length; i++) {
+    const m = mkts[i];
+    if (!m.token_yes) continue;
+    const cache: any = { mid: null, askY: null, bidY: null, askN: null, bidN: null, bookY: null };
+    try {
+      const bookY = await getOrderbook(env, m.token_yes);
+      if (bookY?.bids?.length && bookY?.asks?.length) {
+        cache.bookY = bookY;
+        cache.bidY = parseFloat(bookY.bids[0].price);
+        cache.askY = parseFloat(bookY.asks[0].price);
+        cache.mid = (cache.bidY + cache.askY) / 2;
       }
-      priceCache[m.condition_id] = cache;
-    }));
+      if (m.token_no) {
+        await sleep(FETCH_PACING_MS);
+        const bookN = await getOrderbook(env, m.token_no);
+        if (bookN?.bids?.length && bookN?.asks?.length) {
+          cache.bidN = parseFloat(bookN.bids[0].price);
+          cache.askN = parseFloat(bookN.asks[0].price);
+        }
+      }
+    } catch (e: any) {
+      console.error('Price fetch failed for', m.condition_id, e.message);
+    }
+    priceCache[m.condition_id] = cache;
+
+    // Record snapshot inline (no extra batch loop)
+    try {
+      const sp = cache.mid != null && cache.askN != null ? Math.abs(1 - cache.mid - cache.askN) : null;
+      await db.prepare('INSERT INTO price_snapshots(condition_id,price_yes,price_no,spread) VALUES(?,?,?,?)').bind(m.condition_id, cache.mid, cache.askN, sp).run();
+    } catch {}
+
+    // Pace between markets (skip after last)
+    if (i < mkts.length - 1) await sleep(MARKET_PACING_MS);
   }
 
-  // Record snapshots (batched to respect subrequest limit)
-  for (let i = 0; i < mkts.length; i += BATCH_SIZE) {
-    const batch = mkts.slice(i, i + BATCH_SIZE);
-    await Promise.all(batch.map(async (m: any) => {
-      try {
-        const c = priceCache[m.condition_id];
-        if (!c) return;
-        const sp = c.mid != null && c.askN != null ? Math.abs(1 - c.mid - c.askN) : null;
-        await db.prepare('INSERT INTO price_snapshots(condition_id,price_yes,price_no,spread) VALUES(?,?,?,?)').bind(m.condition_id, c.mid, c.askN, sp).run();
-      } catch {}
-    }));
-  }
-
-  // ============= RUN STRATEGIES IN PARALLEL =============
+  // ============= RUN STRATEGIES SEQUENTIALLY WITH PACING =============
+  // Strategies use cached prices (no API calls), so fast.
+  // Small delays between strategies to spread DB writes evenly.
   const opps: any[] = [];
-  const stratTasks: Promise<any[]>[] = [];
+  const STRATEGY_PACING_MS = 500; // 0.5s between strategy types for one market
 
   for (const m of mkts) {
     const cache = priceCache[m.condition_id];
-    stratTasks.push((async () => {
-      const r: any[] = [];
-      try {
-        if (enabled.includes('complement')) { const o = await strategyComplement(env, m, minSpread, tradeSize, cache); if (o) r.push({ ...o, market: m.question, condition_id: m.condition_id }); }
-        if (enabled.includes('probability')) { const o = await strategyProbability(env, m, db, tradeSize, balance, mode, cache); if (o) r.push({ ...o, market: m.question, condition_id: m.condition_id }); }
-        if (enabled.includes('market_making')) { const o = await strategyMarketMaking(env, m, tradeSize, cache); if (o) r.push({ ...o, market: m.question, condition_id: m.condition_id }); }
-        if (enabled.includes('momentum')) { const o = await strategyMomentum(env, m, db, tradeSize, balance, mode, cache); if (o) r.push({ ...o, market: m.question, condition_id: m.condition_id }); }
-      } catch {}
-      return r;
-    })());
+    try {
+      if (enabled.includes('complement')) {
+        const o = await strategyComplement(env, m, minSpread, tradeSize, cache);
+        if (o) opps.push({ ...o, market: m.question, condition_id: m.condition_id });
+        await sleep(STRATEGY_PACING_MS);
+      }
+      if (enabled.includes('probability')) {
+        const o = await strategyProbability(env, m, db, tradeSize, balance, mode, cache);
+        if (o) opps.push({ ...o, market: m.question, condition_id: m.condition_id });
+        await sleep(STRATEGY_PACING_MS);
+      }
+      if (enabled.includes('market_making')) {
+        const o = await strategyMarketMaking(env, m, tradeSize, cache);
+        if (o) opps.push({ ...o, market: m.question, condition_id: m.condition_id });
+        await sleep(STRATEGY_PACING_MS);
+      }
+      if (enabled.includes('momentum')) {
+        const o = await strategyMomentum(env, m, db, tradeSize, balance, mode, cache);
+        if (o) opps.push({ ...o, market: m.question, condition_id: m.condition_id });
+        await sleep(STRATEGY_PACING_MS);
+      }
+    } catch {}
   }
-
-  const stratResults = await Promise.all(stratTasks);
-  for (const r of stratResults) opps.push(...r);
 
   // Logical arbitrage runs across ALL markets (not per-market)
   if (enabled.includes('logical')) {
@@ -982,7 +991,8 @@ async function executeTrade(env: Env, db: D1Database, opp: any, mode: string) {
       } catch (e: any) {
         status = 'error';
         orderId = 'err_' + Date.now();
-        await db.prepare("INSERT INTO alerts(level,message) VALUES('critical',?)").bind('下单失败: ' + e.message.slice(0, 200)).run();
+        const errDetail = `下单失败 [${opp.strategy}] ${leg.side} ${leg.size.toFixed(2)}@$${leg.price.toFixed(3)}: ${(e.message || String(e)).slice(0, 300)}`;
+        await db.prepare("INSERT INTO alerts(level,message) VALUES('critical',?)").bind(errDetail).run();
       }
     }
 
