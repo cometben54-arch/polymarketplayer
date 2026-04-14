@@ -10,7 +10,7 @@
 
 <!-- Header -->
 <div class="header">
-    <h1><span>&#9670;</span> Polymarket 套利机器人 <span style="font-size:10px;color:#64748b;font-weight:400;margin-left:8px">v2.9.3 | 2026-04-14 11:24</span></h1>
+    <h1><span>&#9670;</span> Polymarket 套利机器人 <span style="font-size:10px;color:#64748b;font-weight:400;margin-left:8px">v2.9.4 | 2026-04-14 11:30</span></h1>
     <div class="header-controls">
         <span id="apiDot" style="width:8px;height:8px;border-radius:50%;display:inline-block;background:#ef4444"></span>
         <span id="apiStatus" style="font-size:12px;color:#94a3b8">检测中...</span>
@@ -358,7 +358,22 @@ async function saveRisk() { await api('/risk', 'PUT', { max_position_size_usd: +
 
 // Trades & Alerts
 async function loadTrades() { const t = await api('/trades?limit=30'), tb = document.getElementById('tradesTable'), e = document.getElementById('noTrades'); if (!t.length) { tb.innerHTML = ''; e.style.display = ''; return; } e.style.display = 'none'; tb.innerHTML = t.map(x => '<tr><td>' + new Date(x.created_at).toLocaleString() + '</td><td style="color:' + (x.side === 'BUY' ? '#22c55e' : '#ef4444') + '">' + x.side + '</td><td>$' + x.price.toFixed(3) + '</td><td>' + x.size.toFixed(2) + '</td><td>$' + x.amount_usd.toFixed(2) + '</td><td>' + x.status + '</td></tr>').join(''); }
-async function loadAlerts() { const a = await api('/alerts?limit=20'), c = document.getElementById('alertsList'); document.getElementById('alertCount').textContent = a.filter(x => !x.resolved).length + ' 条未解决'; if (!a.length) { c.innerHTML = '<div style="text-align:center;padding:20px;color:#94a3b8">暂无警报</div>'; return; } c.innerHTML = a.map(x => '<div class="alert-item alert-' + x.level + (x.resolved ? ' alert-resolved' : '') + '"><div><strong>' + x.level.toUpperCase() + '</strong> ' + x.message + '</div>' + (!x.resolved ? '<button class="btn btn-ghost btn-sm" onclick="resolveAlert(' + x.id + ')">解决</button>' : '') + '</div>').join(''); }
+async function loadAlerts() {
+  const a = await api('/alerts?limit=20');
+  const c = document.getElementById('alertsList');
+  document.getElementById('alertCount').textContent = a.filter(x => !x.resolved).length + ' 条未解决';
+  if (!a.length) { c.innerHTML = '<div style="text-align:center;padding:20px;color:#94a3b8">暂无警报</div>'; return; }
+  c.innerHTML = a.map(function(x) {
+    const ts = x.created_at ? new Date(x.created_at.replace(' ', 'T') + 'Z').toLocaleString('zh-CN', { hour12: false }) : '';
+    return '<div class="alert-item alert-' + x.level + (x.resolved ? ' alert-resolved' : '') + '">'
+      + '<div style="flex:1;min-width:0">'
+      + '<div style="font-size:10px;color:#64748b;margin-bottom:2px">&#128338; ' + ts + '</div>'
+      + '<div><strong>' + x.level.toUpperCase() + '</strong> ' + x.message + '</div>'
+      + '</div>'
+      + (!x.resolved ? '<button class="btn btn-ghost btn-sm" onclick="resolveAlert(' + x.id + ')" style="flex-shrink:0">解决</button>' : '')
+      + '</div>';
+  }).join('');
+}
 async function resolveAlert(id) { await api('/alerts/' + id + '/resolve', 'POST'); loadAlerts(); }
 async function loadOpportunities() {
   try {
