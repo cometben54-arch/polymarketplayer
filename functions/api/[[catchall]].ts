@@ -171,6 +171,64 @@ function getFeeForCategory(topic: string | undefined): number {
   return CATEGORY_FEES[t] ?? DEFAULT_FEE;
 }
 
+// Smart classifier: detect category from market question text
+// Polymarket sometimes mislabels markets in Gamma API. We override based on keywords.
+function classifyByKeywords(question: string, currentTopic: string = ''): string {
+  if (!question) return currentTopic || 'other';
+  const q = question.toLowerCase();
+
+  // GEOPOLITICS: international relations, conflicts, diplomacy, world events
+  const geoKeywords = [
+    'us-iran', 'us iran', 'iran-us', 'iran us', 'iran nuclear', 'iran deal',
+    'israel', 'palestine', 'gaza', 'hamas', 'hezbollah', 'lebanon',
+    'russia', 'ukraine', 'putin', 'zelensky', 'crimea',
+    'china taiwan', 'taiwan strait', 'xi jinping', 'taiwan war',
+    'north korea', 'kim jong un', 'south korea',
+    'nato', 'g7', 'g20', 'un security', 'united nations',
+    'syria', 'yemen', 'houthi', 'red sea',
+    'venezuela', 'maduro', 'cuba',
+    'sanctions on', 'embargo', 'ceasefire', 'peace deal', 'diplomatic',
+    'hormuz', 'strait of', 'persian gulf',
+    'wto', 'tariff war', 'trade war',
+    'wagner', 'mercenar',
+    'invasion', 'invade', 'annex', 'sovereign',
+    'nuclear test', 'nuclear weapon', 'icbm', 'missile test',
+    'embassy', 'ambassador', 'summit',
+    'border crossing', 'refugee crisis',
+  ];
+  for (const kw of geoKeywords) if (q.includes(kw)) return 'geopolitics';
+
+  // CRYPTO
+  const cryptoKeywords = ['bitcoin', 'btc', 'ethereum', 'eth ', 'eth?', 'solana', 'sol ', 'doge', 'crypto', 'altcoin', 'defi', 'nft', 'stablecoin', 'binance', 'coinbase', 'sec ruling', 'satoshi'];
+  for (const kw of cryptoKeywords) if (q.includes(kw)) return 'crypto';
+
+  // SPORTS
+  const sportsKeywords = ['nba', 'nfl', 'mlb', 'nhl', 'fifa', 'world cup', 'olympics', 'championship', 'super bowl', 'finals', 'playoff', 'lakers', 'warriors', 'liverpool', 'real madrid', 'champions league', 'tennis', 'golf', 'f1 grand prix', 'formula 1', 'ufc'];
+  for (const kw of sportsKeywords) if (q.includes(kw)) return 'sports';
+
+  // WEATHER / CLIMATE
+  const weatherKeywords = ['hurricane', 'tornado', 'typhoon', 'earthquake', 'tsunami', 'wildfire', 'flood', 'drought', 'climate', 'global warming', 'temperature record'];
+  for (const kw of weatherKeywords) if (q.includes(kw)) return 'weather';
+
+  // ECONOMICS / FED
+  const econKeywords = ['fed rate', 'fomc', 'cpi ', 'inflation', 'recession', 'gdp', 'unemployment rate', 'jobs report', 'fed cut', 'fed hike', 'interest rate', 'jerome powell'];
+  for (const kw of econKeywords) if (q.includes(kw)) return 'economics';
+
+  // FINANCE / STOCKS
+  const finKeywords = ['s&p 500', 'nasdaq', 'dow jones', 'stock', 'tesla', 'apple', 'nvidia', 'microsoft', 'amazon', 'ipo', 'dividend', 'earnings'];
+  for (const kw of finKeywords) if (q.includes(kw)) return 'finance';
+
+  // TECH
+  const techKeywords = ['openai', 'chatgpt', 'gpt-', 'claude', 'anthropic', 'gemini', 'google ai', 'meta ai', 'agi ', 'artificial general', 'self-driving', 'robotaxi', 'spacex launch', 'nasa launch'];
+  for (const kw of techKeywords) if (q.includes(kw)) return 'tech';
+
+  // POLITICS (US domestic, elections, etc.)
+  const politicsKeywords = ['election', 'president 2028', 'primary', 'democrat', 'republican', 'congress', 'senate', 'house bill', 'supreme court', 'scotus', 'governor', 'mayor', 'biden', 'trump approval', 'kamala'];
+  for (const kw of politicsKeywords) if (q.includes(kw)) return 'politics';
+
+  return currentTopic || 'other';
+}
+
 // =============================================
 // STRATEGY 1: Complement Arbitrage (Dutch Book)
 // YES + NO should = $1. If not, guaranteed profit after fees.
@@ -1066,21 +1124,22 @@ app.get('/markets/prices', async c => {
 });
 app.post('/markets', async c => {
   const b = await c.req.json();
-  let topic = b.topic;
-  // Auto-fetch topic from Gamma API if not provided or generic
+  let topic = b.topic || '';
+  // Auto-fetch topic from Gamma API if not provided
   if (!topic || topic === 'other') {
     try {
       const gamma = await fetch(`${GAMMA(c.env)}/markets?condition_ids=${b.condition_id}`);
       if (gamma.ok) {
         const gm: any[] = await gamma.json();
         if (gm.length > 0) {
-          const fetched = (gm[0].category || gm[0].tag || '').toLowerCase();
-          if (fetched) topic = fetched;
+          topic = (gm[0].category || gm[0].tag || '').toLowerCase();
         }
       }
     } catch {}
-    if (!topic) topic = 'other';
   }
+  // Smart override: use keyword classifier (especially for geopolitics that Gamma mislabels)
+  topic = classifyByKeywords(b.question || '', topic);
+  if (!topic) topic = 'other';
   await c.env.DB.prepare('INSERT OR REPLACE INTO watched_markets(condition_id,question,token_yes,token_no,user_conviction,topic) VALUES(?,?,?,?,?,?)').bind(b.condition_id, b.question, b.token_yes || null, b.token_no || null, b.user_conviction || 0.5, topic).run();
   return c.json({ status: 'added', topic });
 });
@@ -1285,43 +1344,38 @@ app.post('/markets/fix-tokens', async c => {
   const mkts = (await c.env.DB.prepare('SELECT * FROM watched_markets WHERE active=1').all()).results as any[];
   const fixed: string[] = [];
   for (const m of mkts) {
-    let needsTokens = !m.token_yes || m.token_yes.length < 10 || !m.token_no || m.token_no.length < 10;
-    let needsTopic = !m.topic || m.topic === 'other' || m.topic === '';
-    if (!needsTokens && !needsTopic) continue;
     try {
-      // Try Gamma API first (has both tokens AND category)
+      let tY = m.token_yes, tN = m.token_no;
+      let gammaTopic = '';
+
+      // Always re-fetch Gamma to get fresh tokens AND category
       const gamma = await fetch(`${GAMMA(c.env)}/markets?condition_ids=${m.condition_id}`);
       if (gamma.ok) {
         const gm: any[] = await gamma.json();
         if (gm.length > 0) {
           const g = gm[0];
-          const [tY, tN] = parseClobTokens(g.clobTokenIds);
-          const topic = (g.category || g.tag || '').toLowerCase() || 'other';
-          if (tY && tN) {
-            await c.env.DB.prepare('UPDATE watched_markets SET token_yes=?, token_no=?, topic=? WHERE condition_id=?').bind(tY, tN, topic, m.condition_id).run();
-            fixed.push(m.question.slice(0, 30) + ': OK [' + topic + ']');
-            continue;
-          } else if (topic) {
-            // Update at least the topic
-            await c.env.DB.prepare('UPDATE watched_markets SET topic=? WHERE condition_id=?').bind(topic, m.condition_id).run();
-          }
+          const [gY, gN] = parseClobTokens(g.clobTokenIds);
+          if (gY && gN) { tY = gY; tN = gN; }
+          gammaTopic = (g.category || g.tag || '').toLowerCase();
         }
       }
-      // Fallback: CLOB API for tokens only
-      const clob: any = await clobGet(c.env, `/markets/${m.condition_id}`);
-      if (clob && clob.tokens) {
-        const tokens = clob.tokens;
-        const yes = tokens.find((t: any) => t.outcome === 'Yes')?.token_id || tokens[0]?.token_id || '';
-        const no = tokens.find((t: any) => t.outcome === 'No')?.token_id || tokens[1]?.token_id || '';
-        const topic = (clob.category || clob.tag || '').toLowerCase() || 'other';
-        if (yes && no) {
-          await c.env.DB.prepare('UPDATE watched_markets SET token_yes=?, token_no=?, topic=? WHERE condition_id=?').bind(yes, no, topic, m.condition_id).run();
-          fixed.push(m.question.slice(0, 30) + ': OK [' + topic + ']');
-          continue;
+
+      // Fallback: CLOB API for tokens
+      if (!tY || tY.length < 10) {
+        const clob: any = await clobGet(c.env, `/markets/${m.condition_id}`);
+        if (clob && clob.tokens) {
+          tY = clob.tokens.find((t: any) => t.outcome === 'Yes')?.token_id || clob.tokens[0]?.token_id || tY;
+          tN = clob.tokens.find((t: any) => t.outcome === 'No')?.token_id || clob.tokens[1]?.token_id || tN;
+          if (!gammaTopic) gammaTopic = (clob.category || clob.tag || '').toLowerCase();
         }
       }
-      fixed.push(m.question.slice(0, 30) + ': FAILED');
-    } catch (e: any) { fixed.push(m.question.slice(0, 30) + ': ERROR - ' + e.message); }
+
+      // Smart classification: override with keyword-based detection
+      const topic = classifyByKeywords(m.question || '', gammaTopic) || 'other';
+
+      await c.env.DB.prepare('UPDATE watched_markets SET token_yes=?, token_no=?, topic=? WHERE condition_id=?').bind(tY, tN, topic, m.condition_id).run();
+      fixed.push(m.question.slice(0, 35) + ' → [' + topic + ']');
+    } catch (e: any) { fixed.push(m.question.slice(0, 35) + ': ERROR - ' + e.message); }
   }
   return c.json({ fixed });
 });
