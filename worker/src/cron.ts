@@ -23,8 +23,8 @@ export default {
 
     const cronPattern = event.cron;
 
-    // Every 2 minutes: scan
-    if (cronPattern === '*/2 * * * *') {
+    // Every minute: scan
+    if (cronPattern === '* * * * *') {
       ctx.waitUntil(
         fetch(`${baseUrl}/api/scan`, { method: 'POST', headers })
           .then(r => r.json())

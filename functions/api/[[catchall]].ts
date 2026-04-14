@@ -233,9 +233,10 @@ function classifyByKeywords(question: string, currentTopic: string = ''): string
 // STRATEGY 1: Complement Arbitrage (Dutch Book)
 // YES + NO should = $1. If not, guaranteed profit after fees.
 // =============================================
-async function strategyComplement(env: Env, m: any, minSpread: number, tradeSize: number): Promise<any|null> {
+async function strategyComplement(env: Env, m: any, minSpread: number, tradeSize: number, cache?: any): Promise<any|null> {
   if (!m.token_yes || !m.token_no) return null;
-  const [pY, pN] = await Promise.all([getPrice(env, m.token_yes, 'BUY'), getPrice(env, m.token_no, 'BUY')]);
+  const pY = cache?.askY ?? await getPrice(env, m.token_yes, 'BUY');
+  const pN = cache?.askN ?? await getPrice(env, m.token_no, 'BUY');
   if (pY === null || pN === null) return null;
   if (pY < 0.03 || pN < 0.03) return null; // Skip extreme prices
   const fee = getFeeForCategory(m.topic);
@@ -250,7 +251,8 @@ async function strategyComplement(env: Env, m: any, minSpread: number, tradeSize
       fee_rate: fee,
       legs: [{ token: m.token_yes, side: 'BUY', price: pY, size: sh }, { token: m.token_no, side: 'BUY', price: pN, size: sh }] };
   }
-  const [bY, bN] = await Promise.all([getPrice(env, m.token_yes, 'SELL'), getPrice(env, m.token_no, 'SELL')]);
+  const bY = cache?.bidY ?? await getPrice(env, m.token_yes, 'SELL');
+  const bN = cache?.bidN ?? await getPrice(env, m.token_no, 'SELL');
   if (bY !== null && bN !== null) {
     if (bY < 0.03 || bN < 0.03) return null;
     const totalBid = bY + bN;
@@ -277,9 +279,9 @@ async function strategyComplement(env: Env, m: any, minSpread: number, tradeSize
 // Returns AI-estimated "true" probability, trades on deviation from market.
 // User conviction is used as WEAK prior, not main signal.
 // =============================================
-async function strategyProbability(env: Env, m: any, db: D1Database, tradeSize: number, balance: number, mode: string): Promise<any|null> {
+async function strategyProbability(env: Env, m: any, db: D1Database, tradeSize: number, balance: number, mode: string, cache?: any): Promise<any|null> {
   if (!m.token_yes) return null;
-  const marketPrice = await getMidpoint(env, m.token_yes);
+  const marketPrice = cache?.mid ?? await getMidpoint(env, m.token_yes);
   if (marketPrice === null || marketPrice < 0.05 || marketPrice > 0.95) return null;
 
   // Rate limit AI calls: only run per market every 30 minutes
@@ -378,7 +380,7 @@ reasoning: 核心理由`;
 
   const feeRate = getFeeForCategory(m.topic);
   if (deviation > 0) {
-    const price = await getPrice(env, m.token_yes, 'BUY');
+    const price = cache?.askY ?? await getPrice(env, m.token_yes, 'BUY');
     if (price === null || price < 0.05 || price > 0.95) return null;
     if (balance < dollarBet) return null;
     const size = Math.min(dollarBet / price, 100);
@@ -392,7 +394,7 @@ reasoning: 核心理由`;
   } else {
     const position = mode === 'paper' ? await getPaperPosition(db, m.token_yes) : await getTokenPosition(env, m.token_yes);
     if (position < 1) return null;
-    const price = await getPrice(env, m.token_yes, 'SELL');
+    const price = cache?.bidY ?? await getPrice(env, m.token_yes, 'SELL');
     if (price === null || price < 0.05) return null;
     const size = Math.min(position, 100, dollarBet / price);
     if (size < 1) return null;
@@ -449,9 +451,9 @@ async function _strategyProbabilityLegacy(env: Env, m: any, db: D1Database, trad
 // STRATEGY 3: Market Making (bid-ask spread)
 // Place limit orders on both sides to capture spread.
 // =============================================
-async function strategyMarketMaking(env: Env, m: any, tradeSize: number): Promise<any|null> {
+async function strategyMarketMaking(env: Env, m: any, tradeSize: number, cache?: any): Promise<any|null> {
   if (!m.token_yes) return null;
-  const book = await getOrderbook(env, m.token_yes);
+  const book = cache?.bookY ?? await getOrderbook(env, m.token_yes);
   if (!book || !book.bids?.length || !book.asks?.length) return null;
   const bestBid = parseFloat(book.bids[0].price);
   const bestAsk = parseFloat(book.asks[0].price);
@@ -488,7 +490,7 @@ async function strategyMarketMaking(env: Env, m: any, tradeSize: number): Promis
 // STRATEGY 4: Momentum (with balance/position checks)
 // Buys on upward momentum if cash available; sells on downward momentum only if holding.
 // =============================================
-async function strategyMomentum(env: Env, m: any, db: D1Database, tradeSize: number, balance: number, mode: string): Promise<any|null> {
+async function strategyMomentum(env: Env, m: any, db: D1Database, tradeSize: number, balance: number, mode: string, cache?: any): Promise<any|null> {
   if (!m.token_yes) return null;
   const snaps = (await db.prepare('SELECT price_yes,recorded_at FROM price_snapshots WHERE condition_id=? ORDER BY recorded_at DESC LIMIT 10').bind(m.condition_id).all()).results as any[];
   if (snaps.length < 3) return null;
@@ -505,7 +507,7 @@ async function strategyMomentum(env: Env, m: any, db: D1Database, tradeSize: num
 
   if (change > 0) {
     // Upward momentum → BUY YES (needs cash)
-    const price = await getPrice(env, m.token_yes, 'BUY');
+    const price = cache?.askY ?? await getPrice(env, m.token_yes, 'BUY');
     if (price === null || price < 0.03 || price > 0.97) return null;
     if (balance < dollarBet) return null;
     const size = Math.min(dollarBet / price, 100);
@@ -520,7 +522,7 @@ async function strategyMomentum(env: Env, m: any, db: D1Database, tradeSize: num
     // Downward momentum → SELL YES only if we hold it
     const position = mode === 'paper' ? await getPaperPosition(db, m.token_yes) : await getTokenPosition(env, m.token_yes);
     if (position < 1) return null;
-    const price = await getPrice(env, m.token_yes, 'SELL');
+    const price = cache?.bidY ?? await getPrice(env, m.token_yes, 'SELL');
     if (price === null || price < 0.03) return null;
     const size = Math.min(position, 100, dollarBet / price);
     if (size < 1) return null;
@@ -731,31 +733,62 @@ async function runScan(env: Env) {
   const enabledStr = await getSetting(db, 'ENABLED_STRATEGIES', 'complement,probability,market_making,momentum,logical');
   const enabled = enabledStr.split(',').map(s => s.trim());
   const mode = await getSetting(db, 'TRADING_MODE', 'paper');
-  const cooldown = parseInt(await getSetting(db, 'TRADE_COOLDOWN_SEC', '60'));
+  const cooldown = parseInt(await getSetting(db, 'TRADE_COOLDOWN_SEC', '30'));
 
   // Get current available balance (paper or real)
   const startingCash = parseFloat(await getSetting(db, 'STARTING_CASH', '100'));
   const balance = mode === 'paper' ? await getPaperBalance(db, startingCash) : await getAccountBalance(env);
 
-  // Price snapshots
-  for (const m of mkts) {
+  // ============= PARALLEL PRICE FETCH (one batch per scan) =============
+  // Fetch all prices/orderbooks for all markets in parallel. Cache for strategies.
+  const priceCache: Record<string, { mid: number | null; askY: number | null; bidY: number | null; askN: number | null; bidN: number | null; bookY: any }> = {};
+  await Promise.all(mkts.map(async (m: any) => {
+    if (!m.token_yes) return;
+    const cache: any = { mid: null, askY: null, bidY: null, askN: null, bidN: null, bookY: null };
+    const tasks: Promise<any>[] = [
+      getMidpoint(env, m.token_yes).then(p => cache.mid = p),
+      getPrice(env, m.token_yes, 'BUY').then(p => cache.askY = p),
+      getPrice(env, m.token_yes, 'SELL').then(p => cache.bidY = p),
+      getOrderbook(env, m.token_yes).then(b => cache.bookY = b),
+    ];
+    if (m.token_no) {
+      tasks.push(getPrice(env, m.token_no, 'BUY').then(p => cache.askN = p));
+      tasks.push(getPrice(env, m.token_no, 'SELL').then(p => cache.bidN = p));
+    }
+    await Promise.all(tasks);
+    priceCache[m.condition_id] = cache;
+  }));
+
+  // Record snapshots in parallel (using cached prices)
+  await Promise.all(mkts.map(async (m: any) => {
     try {
-      const [pY, pN] = await Promise.all([m.token_yes ? getMidpoint(env, m.token_yes) : null, m.token_no ? getMidpoint(env, m.token_no) : null]);
-      const sp = pY != null && pN != null ? Math.abs(1 - pY - pN) : null;
-      await db.prepare('INSERT INTO price_snapshots(condition_id,price_yes,price_no,spread) VALUES(?,?,?,?)').bind(m.condition_id, pY, pN, sp).run();
+      const c = priceCache[m.condition_id];
+      if (!c) return;
+      const sp = c.mid != null && c.askN != null ? Math.abs(1 - c.mid - c.askN) : null;
+      await db.prepare('INSERT INTO price_snapshots(condition_id,price_yes,price_no,spread) VALUES(?,?,?,?)').bind(m.condition_id, c.mid, c.askN, sp).run();
     } catch {}
+  }));
+
+  // ============= RUN STRATEGIES IN PARALLEL =============
+  const opps: any[] = [];
+  const stratTasks: Promise<any[]>[] = [];
+
+  for (const m of mkts) {
+    const cache = priceCache[m.condition_id];
+    stratTasks.push((async () => {
+      const r: any[] = [];
+      try {
+        if (enabled.includes('complement')) { const o = await strategyComplement(env, m, minSpread, tradeSize, cache); if (o) r.push({ ...o, market: m.question, condition_id: m.condition_id }); }
+        if (enabled.includes('probability')) { const o = await strategyProbability(env, m, db, tradeSize, balance, mode, cache); if (o) r.push({ ...o, market: m.question, condition_id: m.condition_id }); }
+        if (enabled.includes('market_making')) { const o = await strategyMarketMaking(env, m, tradeSize, cache); if (o) r.push({ ...o, market: m.question, condition_id: m.condition_id }); }
+        if (enabled.includes('momentum')) { const o = await strategyMomentum(env, m, db, tradeSize, balance, mode, cache); if (o) r.push({ ...o, market: m.question, condition_id: m.condition_id }); }
+      } catch {}
+      return r;
+    })());
   }
 
-  // Run strategies
-  const opps: any[] = [];
-  for (const m of mkts) {
-    try {
-      if (enabled.includes('complement')) { const o = await strategyComplement(env, m, minSpread, tradeSize); if (o) opps.push({ ...o, market: m.question, condition_id: m.condition_id }); }
-      if (enabled.includes('probability')) { const o = await strategyProbability(env, m, db, tradeSize, balance, mode); if (o) opps.push({ ...o, market: m.question, condition_id: m.condition_id }); }
-      if (enabled.includes('market_making')) { const o = await strategyMarketMaking(env, m, tradeSize); if (o) opps.push({ ...o, market: m.question, condition_id: m.condition_id }); }
-      if (enabled.includes('momentum')) { const o = await strategyMomentum(env, m, db, tradeSize, balance, mode); if (o) opps.push({ ...o, market: m.question, condition_id: m.condition_id }); }
-    } catch {}
-  }
+  const stratResults = await Promise.all(stratTasks);
+  for (const r of stratResults) opps.push(...r);
 
   // Logical arbitrage runs across ALL markets (not per-market)
   if (enabled.includes('logical')) {
@@ -842,54 +875,52 @@ function createClobClient(env: Env, creds: { key: string; secret: string; passph
   );
 }
 
-async function executeTrade(env: Env, db: D1Database, opp: any, mode: string) {
-  await setState(db, 'last_trade_time', Math.floor(Date.now() / 1000).toString());
-  const results: any[] = [];
+// Cache token metadata (tick size, negRisk) in DB to avoid fetching every trade
+async function getTokenMetaCached(db: D1Database, client: any, tokenId: string): Promise<{tickSize: string, negRisk: boolean}> {
+  const cacheKey = 'tokmeta_' + tokenId.slice(0, 20);
+  const cached = await getState(db, cacheKey);
+  if (cached) {
+    try { return JSON.parse(cached); } catch {}
+  }
+  let tickSize = '0.01', negRisk = false;
+  try { const [ts, nr] = await Promise.all([client.getTickSize(tokenId), client.getNegRisk(tokenId)]); if (ts) tickSize = ts; negRisk = !!nr; } catch {}
+  await setState(db, cacheKey, JSON.stringify({ tickSize, negRisk }));
+  return { tickSize, negRisk };
+}
 
-  for (const leg of opp.legs || []) {
+async function executeTrade(env: Env, db: D1Database, opp: any, mode: string) {
+  const t0 = Date.now();
+  await setState(db, 'last_trade_time', Math.floor(t0 / 1000).toString());
+
+  // Create client once for all legs (reused for parallel execution)
+  let client: any = null;
+  if (mode === 'real' && env.POLYMARKET_PRIVATE_KEY && env.POLYMARKET_API_KEY && env.POLYMARKET_API_SECRET) {
+    client = createClobClient(env, {
+      key: env.POLYMARKET_API_KEY,
+      secret: env.POLYMARKET_API_SECRET,
+      passphrase: env.POLYMARKET_API_PASSPHRASE || '',
+    });
+  }
+
+  // PARALLEL leg execution: all legs are placed simultaneously
+  const legResults = await Promise.all((opp.legs || []).map(async (leg: any) => {
     let orderId = 'paper_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6);
     let status = 'filled';
 
     if (mode === 'real') {
-      // --- REAL TRADE via @polymarket/clob-client ---
       try {
-        if (!env.POLYMARKET_PRIVATE_KEY || !env.POLYMARKET_API_KEY || !env.POLYMARKET_API_SECRET) {
+        if (!client) {
           status = 'error_no_creds';
           orderId = 'err_' + Date.now();
         } else {
-          const client = createClobClient(env, {
-            key: env.POLYMARKET_API_KEY,
-            secret: env.POLYMARKET_API_SECRET,
-            passphrase: env.POLYMARKET_API_PASSPHRASE || '',
-          });
-
           const side = leg.side === 'BUY' ? Side.BUY : Side.SELL;
-
-          // Get tick size for this token
-          let tickSize = '0.01';
-          try {
-            const ts = await client.getTickSize(leg.token);
-            if (ts) tickSize = ts;
-          } catch {}
-
-          // Get neg risk
-          let negRisk = false;
-          try {
-            negRisk = await client.getNegRisk(leg.token);
-          } catch {}
-
-          // Place limit order (GTC = Good Till Cancelled)
+          // Use cached metadata
+          const { tickSize, negRisk } = await getTokenMetaCached(db, client, leg.token);
           const result = await client.createAndPostOrder(
-            {
-              tokenID: leg.token,
-              price: leg.price,
-              side: side,
-              size: leg.size,
-            },
+            { tokenID: leg.token, price: leg.price, side, size: leg.size },
             { tickSize, negRisk },
             OrderType.GTC,
           );
-
           if (result && (result.orderID || result.success !== false)) {
             orderId = result.orderID || result.id || ('real_' + Date.now());
             status = 'submitted';
@@ -899,8 +930,7 @@ async function executeTrade(env: Env, db: D1Database, opp: any, mode: string) {
           } else {
             status = 'rejected';
             orderId = 'rej_' + Date.now();
-            const errMsg = JSON.stringify(result).slice(0, 200);
-            await db.prepare("INSERT INTO alerts(level,message) VALUES('warning',?)").bind('订单被拒绝: ' + errMsg).run();
+            await db.prepare("INSERT INTO alerts(level,message) VALUES('warning',?)").bind('订单被拒绝: ' + JSON.stringify(result).slice(0, 200)).run();
           }
         }
       } catch (e: any) {
@@ -910,21 +940,24 @@ async function executeTrade(env: Env, db: D1Database, opp: any, mode: string) {
       }
     }
 
-    await db.prepare('INSERT INTO trades(condition_id,side,token_id,price,size,amount_usd,order_id,status,strategy,mode) VALUES(?,?,?,?,?,?,?,?,?,?)').bind(
-      opp.condition_id, leg.side, leg.token, leg.price, leg.size, leg.price * leg.size, orderId, status, opp.strategy, mode
-    ).run();
+    return { leg, orderId, status };
+  }));
 
-    results.push({ side: leg.side, price: leg.price, status, orderId });
-  }
+  // Insert all trade records in parallel
+  await Promise.all(legResults.map((r: any) =>
+    db.prepare('INSERT INTO trades(condition_id,side,token_id,price,size,amount_usd,order_id,status,strategy,mode) VALUES(?,?,?,?,?,?,?,?,?,?)')
+      .bind(opp.condition_id, r.leg.side, r.leg.token, r.leg.price, r.leg.size, r.leg.price * r.leg.size, r.orderId, r.status, opp.strategy, mode)
+      .run()
+  ));
 
-  // Update total expected P&L (running tally of expected profits)
-  // Note: daily_pnl is now calculated from realized trade flows in runScan
   if (mode === 'paper') {
     const totalPnl = parseFloat(await getState(db, 'total_pnl') || '0') + (opp.profit || 0);
     await setState(db, 'total_pnl', totalPnl.toString());
   }
 
-  return { strategy: opp.strategy, market: opp.market, mode, profit: opp.profit, orders: results };
+  const elapsed = Date.now() - t0;
+  return { strategy: opp.strategy, market: opp.market, mode, profit: opp.profit, latency_ms: elapsed,
+    orders: legResults.map((r: any) => ({ side: r.leg.side, price: r.leg.price, status: r.status, orderId: r.orderId })) };
 }
 
 // =============================================
