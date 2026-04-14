@@ -23,14 +23,26 @@ export default {
 
     const cronPattern = event.cron;
 
-    // Every 2 minutes: scan (allows time for paced API calls)
+    // Every 2 minutes: scan + execute pending trade (separate Worker invocations
+    // to stay under Cloudflare's 50-subrequest-per-invocation limit)
     if (cronPattern === '*/2 * * * *') {
-      ctx.waitUntil(
-        fetch(`${baseUrl}/api/scan`, { method: 'POST', headers })
-          .then(r => r.json())
-          .then(d => console.log('Scan result:', JSON.stringify(d)))
-          .catch(e => console.error('Scan failed:', e.message))
-      );
+      ctx.waitUntil((async () => {
+        try {
+          // Step 1: Scan for opportunities (queues best one to DB)
+          const scanRes = await fetch(`${baseUrl}/api/scan`, { method: 'POST', headers });
+          const scanData = await scanRes.json();
+          console.log('Scan result:', JSON.stringify(scanData).slice(0, 300));
+
+          // Step 2: Execute any pending trade (fresh subrequest budget)
+          // Wait 2s before triggering to let the queue be written
+          await new Promise(r => setTimeout(r, 2000));
+          const execRes = await fetch(`${baseUrl}/api/trade/execute-pending`, { method: 'POST', headers });
+          const execData = await execRes.json();
+          console.log('Trade execute:', JSON.stringify(execData).slice(0, 300));
+        } catch (e: any) {
+          console.error('Cron cycle failed:', e.message);
+        }
+      })());
     }
 
     // Every hour (at minute 0): AI hourly review

@@ -878,8 +878,10 @@ async function runScanInner(env: Env) {
     return true;
   });
 
-  // Auto-trade best opportunity (rate limited + risk checks)
-  let traded = null;
+  // Queue best opportunity for separate execution (avoids subrequest limit)
+  // Trade execution happens in a separate /api/trade/execute-pending call
+  // triggered by the cron worker right after the scan.
+  let queued = null;
   if (tradableOpps.length > 0) {
     if (dailyPnl <= -dailyLossLimit) {
       await addAlert(db, 'critical', `日亏损已达限额 $${dailyLossLimit}，自动暂停交易`);
@@ -889,10 +891,13 @@ async function runScanInner(env: Env) {
       const now = Math.floor(Date.now() / 1000);
       if (now - lastTrade >= cooldown) {
         const best = tradableOpps.sort((a, b) => b.profit - a.profit)[0];
-        traded = await executeTrade(env, db, best, mode);
+        // Save to pending queue (just one at a time for safety)
+        await setState(db, 'pending_trade', JSON.stringify({ ...best, queued_at: now }));
+        queued = best;
       }
     }
   }
+  const traded = queued;
 
   // Always log scan summary so user knows system is alive
   const stratNames: Record<string,string> = { complement: '互补套利', probability: '概率偏差', market_making: '做市', momentum: '动量', logical: '逻辑套利' };
@@ -1495,6 +1500,29 @@ app.get('/debug/markets', async c => {
 
 // Scan & AI
 app.post('/scan', async c => c.json(await runScan(c.env)));
+
+// Execute the pending trade from the queue (separate Worker invocation = fresh subrequest budget)
+app.post('/trade/execute-pending', async c => {
+  const db = c.env.DB;
+  const pendingStr = await getState(db, 'pending_trade');
+  if (!pendingStr) return c.json({ status: 'no_pending' });
+
+  let opp: any;
+  try { opp = JSON.parse(pendingStr); } catch { return c.json({ status: 'invalid' }); }
+  // Stale check: skip if older than 5 minutes
+  const now = Math.floor(Date.now() / 1000);
+  if (opp.queued_at && now - opp.queued_at > 300) {
+    await setState(db, 'pending_trade', '');
+    return c.json({ status: 'stale', age_sec: now - opp.queued_at });
+  }
+
+  // Clear queue first to prevent double execution
+  await setState(db, 'pending_trade', '');
+
+  const mode = await getSetting(db, 'TRADING_MODE', 'paper');
+  const result = await executeTrade(c.env, db, opp, mode);
+  return c.json({ status: 'executed', result });
+});
 app.get('/scan/latest', async c => {
   const cached = await getState(c.env.DB, 'last_scan_result');
   return c.json(cached ? JSON.parse(cached) : { opportunities: [], scanned_at: null });
