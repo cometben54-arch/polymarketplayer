@@ -64,7 +64,16 @@
         <button class="btn btn-ghost btn-sm" onclick="saveStrategies()">保存策略</button>
     </div></div>
 
-    <div class="card"><div class="card-header"><h2>监控市场</h2><div style="display:flex;gap:6px"><button class="btn btn-ghost btn-sm" onclick="fixTokens()" id="btnFixTokens">修复数据</button><button class="btn btn-primary btn-sm" onclick="openModal('addMarket')">+ 添加市场</button></div></div><div class="card-body"><div class="table-wrap"><table><thead><tr><th>问题/话题</th><th>YES</th><th>NO</th><th>我的判断</th><th>操作</th></tr></thead><tbody id="marketsTable"></tbody></table></div><div id="noMarkets" style="text-align:center;padding:20px;color:#94a3b8">暂无监控市场</div></div></div>
+    <div class="card"><div class="card-header"><h2>监控市场</h2><div style="display:flex;gap:6px"><button class="btn btn-ghost btn-sm" onclick="loadHotMarkets()" id="btnHotMarkets">热门推荐</button><button class="btn btn-ghost btn-sm" onclick="fixTokens()" id="btnFixTokens">修复数据</button><button class="btn btn-primary btn-sm" onclick="openModal('addMarket')">+ 添加市场</button></div></div><div class="card-body"><div class="table-wrap"><table><thead><tr><th>问题/话题</th><th>YES</th><th>NO</th><th>我的判断</th><th>操作</th></tr></thead><tbody id="marketsTable"></tbody></table></div><div id="noMarkets" style="text-align:center;padding:20px;color:#94a3b8">暂无监控市场</div></div></div>
+
+    <!-- Hot Markets Modal -->
+    <div class="modal-backdrop" id="modalHotMarkets"><div class="modal" style="max-width:800px;max-height:85vh;overflow-y:auto">
+        <h3>&#128293; 热门市场推荐</h3>
+        <p style="font-size:12px;color:#94a3b8;margin-bottom:14px">基于套利空间、做市价差、流动性、24小时成交量综合评分</p>
+        <div id="hotMarketsStatus" style="text-align:center;padding:20px;color:#94a3b8">加载中...</div>
+        <div id="hotMarketsList" style="max-height:60vh;overflow-y:auto"></div>
+        <div style="text-align:right;margin-top:14px"><button class="btn btn-ghost" onclick="closeModal('hotMarkets')">关闭</button></div>
+    </div></div>
     <div class="card"><div class="card-header"><h2>套利机会</h2><span id="lastScan" style="font-size:12px;color:#94a3b8">等待扫描...</span></div><div class="card-body" id="oppsList"><div style="text-align:center;padding:20px;color:#94a3b8">启动后自动扫描</div></div></div>
     <div class="card"><div class="card-header"><h2>套利分组</h2><button class="btn btn-primary btn-sm" onclick="openModal('addGroup')">+ 创建分组</button></div><div class="card-body"><div class="table-wrap"><table><thead><tr><th>名称</th><th>策略</th><th>市场数</th><th>操作</th></tr></thead><tbody id="groupsTable"></tbody></table></div><div id="noGroups" style="text-align:center;padding:20px;color:#94a3b8">暂无分组</div></div></div>
     <div class="card"><div class="card-header"><h2>风险控制</h2><button class="btn btn-ghost btn-sm" onclick="saveRisk()">保存设置</button></div><div class="card-body"><div class="form-row"><div class="form-group"><label>最大持仓 (USD)</label><input type="number" class="form-control" id="riskMaxPosition" value="100"></div><div class="form-group"><label>日亏损限额 (USD)</label><input type="number" class="form-control" id="riskDailyLoss" value="50"></div></div><div class="form-row"><div class="form-group"><label>单笔交易上限 (USD)</label><input type="number" class="form-control" id="riskMaxTrade" value="20"></div><div class="form-group"><label>最小套利价差</label><input type="number" class="form-control" id="riskMinSpread" value="0.02" step="0.005"></div></div></div></div>
@@ -248,6 +257,46 @@ async function addResolvedMarket(idx) {
 }
 async function addMarketManual() { const c = document.getElementById('marketConditionId').value.trim(), q = document.getElementById('marketQuestion').value.trim(); if (!c || !q) { alert('请填写ID和问题'); return; } await api('/markets', 'POST', { condition_id: c, question: q, token_yes: document.getElementById('marketTokenYes').value.trim() || null, token_no: document.getElementById('marketTokenNo').value.trim() || null }); closeModal('addMarket'); loadMarkets(); }
 async function removeMarket(id) { if (!confirm('确定？')) return; await api('/markets/' + id, 'DELETE'); loadMarkets(); }
+async function loadHotMarkets() {
+  openModal('hotMarkets');
+  const status = document.getElementById('hotMarketsStatus');
+  const list = document.getElementById('hotMarketsList');
+  status.style.display = '';
+  status.textContent = '正在扫描 Polymarket 热门市场 (约10-20秒)...';
+  list.innerHTML = '';
+  try {
+    const r = await api('/markets/hot');
+    if (r.error) { status.textContent = '加载失败: ' + r.error; return; }
+    if (!r.markets || !r.markets.length) { status.textContent = '暂无符合条件的市场'; return; }
+    status.style.display = 'none';
+    list.innerHTML = r.markets.map(function(m, i) {
+      const scoreColor = m.score > 30 ? '#22c55e' : m.score > 15 ? '#f59e0b' : '#94a3b8';
+      const reasons = (m.reasons || []).map(function(r) { return '<span style="background:rgba(91,110,245,0.2);color:#93c5fd;font-size:11px;padding:2px 8px;border-radius:10px;margin-right:4px">' + r + '</span>'; }).join('');
+      return '<div style="background:#1e293b;border-radius:8px;padding:12px;margin-bottom:8px;border-left:3px solid ' + scoreColor + '">'
+        + '<div style="display:flex;justify-content:space-between;align-items:start;gap:8px;margin-bottom:6px">'
+        + '<div style="flex:1;font-size:14px;font-weight:600">' + (i + 1) + '. ' + (m.question || '') + '</div>'
+        + '<div style="flex-shrink:0;font-size:18px;font-weight:800;color:' + scoreColor + '">' + m.score + '</div>'
+        + '</div>'
+        + '<div style="font-size:11px;color:#94a3b8;margin-bottom:4px">' + (m.category || '') + ' | YES: ' + (m.price_yes * 100).toFixed(1) + '¢ | NO: ' + (m.price_no * 100).toFixed(1) + '¢ | 24h量: $' + (m.volume_24h / 1000).toFixed(1) + 'K</div>'
+        + '<div style="margin-bottom:8px">' + reasons + '</div>'
+        + '<button class="btn btn-success btn-sm" onclick="addHotMarket(' + i + ')">+ 添加此市场</button>'
+        + '</div>';
+    }).join('');
+    window._hotMarkets = r.markets;
+  } catch (e) { status.textContent = '加载失败: ' + e.message; }
+}
+async function addHotMarket(idx) {
+  const m = window._hotMarkets[idx];
+  if (!m) return;
+  try {
+    await api('/markets', 'POST', { condition_id: m.condition_id, question: m.question, token_yes: m.token_yes, token_no: m.token_no, topic: m.category || 'other' });
+    const btns = document.querySelectorAll('#hotMarketsList .btn-success');
+    if (btns[idx]) { btns[idx].textContent = '已添加'; btns[idx].disabled = true; btns[idx].className = 'btn btn-ghost btn-sm'; }
+    addLog('已添加热门市场: ' + m.question.slice(0, 30), 'info');
+    loadMarkets();
+  } catch (e) { alert('添加失败: ' + e.message); }
+}
+
 async function fixTokens() {
   const btn = document.getElementById('btnFixTokens');
   btn.disabled = true; btn.textContent = '修复中...';

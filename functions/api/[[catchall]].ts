@@ -1042,6 +1042,90 @@ app.get('/markets/search', async c => {
     if (q) data = data.filter((m: any) => ((m.question || '') + (m.slug || '')).toLowerCase().includes(q)); return c.json(data.slice(0, 20));
   } catch { return c.json([]); }
 });
+
+// Hot markets: fetch active high-liquidity markets and score by arbitrage potential
+app.get('/markets/hot', async c => {
+  try {
+    // Fetch top markets from Gamma sorted by volume
+    const res = await fetch(`${GAMMA(c.env)}/markets?limit=100&active=true&closed=false&order=volume24hr&ascending=false`);
+    if (!res.ok) return c.json({ error: 'Failed to fetch from Gamma API' }, 500);
+    const all: any[] = await res.json();
+
+    // Filter to only binary markets with both tokens
+    const binaryMarkets = all.filter((m: any) => {
+      const [tY, tN] = parseClobTokens(m.clobTokenIds);
+      return tY && tN && m.acceptingOrders !== false;
+    });
+
+    // Fetch live orderbook prices for top 30 and score
+    const scored: any[] = [];
+    const topCandidates = binaryMarkets.slice(0, 30);
+
+    await Promise.all(topCandidates.map(async (m: any) => {
+      const [tY, tN] = parseClobTokens(m.clobTokenIds);
+      try {
+        const [bookY, bookN] = await Promise.all([getOrderbook(c.env, tY), getOrderbook(c.env, tN)]);
+        if (!bookY?.bids?.length || !bookY?.asks?.length) return;
+
+        const bidY = parseFloat(bookY.bids[0].price);
+        const askY = parseFloat(bookY.asks[0].price);
+        const spreadY = askY - bidY;
+
+        let bidN = 0, askN = 0;
+        if (bookN?.bids?.length && bookN?.asks?.length) {
+          bidN = parseFloat(bookN.bids[0].price);
+          askN = parseFloat(bookN.asks[0].price);
+        }
+
+        // Calculate arbitrage potential
+        const complementArbYes = 1 - (askY + askN); // Positive = arb opportunity (buy both)
+        const complementArbNo = (bidY + bidN) - 1;  // Positive = arb opportunity (sell both)
+        const bestComplementArb = Math.max(complementArbYes, complementArbNo, 0);
+
+        // Liquidity score (orderbook depth sum)
+        const liqY = (bookY.bids.slice(0, 5).reduce((s: number, b: any) => s + parseFloat(b.size) * parseFloat(b.price), 0)
+                    + bookY.asks.slice(0, 5).reduce((s: number, a: any) => s + parseFloat(a.size) * parseFloat(a.price), 0));
+
+        // Composite score: market_making potential (wide spread) + complement arb + liquidity + volume
+        const volume24h = parseFloat(m.volume24hr || '0');
+        const mmScore = spreadY > 0.05 ? spreadY * 100 : 0; // wider spread = better making potential
+        const arbScore = bestComplementArb * 1000;
+        const liqScore = Math.min(liqY / 100, 10); // capped at 10
+        const volScore = Math.min(volume24h / 10000, 20); // capped at 20
+        const totalScore = arbScore + mmScore + liqScore + volScore;
+
+        scored.push({
+          condition_id: m.conditionId || m.condition_id,
+          question: m.question,
+          slug: m.slug,
+          category: m.category,
+          token_yes: tY,
+          token_no: tN,
+          price_yes: askY,
+          price_no: askN || (1 - askY),
+          spread: spreadY,
+          complement_gap: bestComplementArb,
+          liquidity_5deep: liqY,
+          volume_24h: volume24h,
+          score: Math.round(totalScore * 10) / 10,
+          reasons: [
+            bestComplementArb > 0.01 ? `互补套利${(bestComplementArb * 100).toFixed(1)}¢` : '',
+            spreadY > 0.05 ? `做市价差${(spreadY * 100).toFixed(1)}¢` : '',
+            liqY > 500 ? `高流动性$${liqY.toFixed(0)}` : '',
+            volume24h > 10000 ? `24h量$${(volume24h/1000).toFixed(0)}K` : '',
+          ].filter(x => x),
+        });
+      } catch {}
+    }));
+
+    // Sort by score descending
+    scored.sort((a, b) => b.score - a.score);
+    return c.json({ markets: scored.slice(0, 20), scanned_at: new Date().toISOString() });
+  } catch (e: any) {
+    return c.json({ error: e.message }, 500);
+  }
+});
+
 // Helper: parse clobTokenIds which can be a JSON string or array
 function parseClobTokens(raw: any): [string, string] {
   if (!raw) return ['', ''];
