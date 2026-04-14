@@ -10,7 +10,7 @@
 
 <!-- Header -->
 <div class="header">
-    <h1><span>&#9670;</span> Polymarket 套利机器人 <span style="font-size:10px;color:#64748b;font-weight:400;margin-left:8px">v2.9.2 | 2026-04-14 11:12</span></h1>
+    <h1><span>&#9670;</span> Polymarket 套利机器人 <span style="font-size:10px;color:#64748b;font-weight:400;margin-left:8px">v2.9.3 | 2026-04-14 11:24</span></h1>
     <div class="header-controls">
         <span id="apiDot" style="width:8px;height:8px;border-radius:50%;display:inline-block;background:#ef4444"></span>
         <span id="apiStatus" style="font-size:12px;color:#94a3b8">检测中...</span>
@@ -365,14 +365,15 @@ async function loadOpportunities() {
     const r = await api('/scan/latest');
     if (r.scanned_at) document.getElementById('lastScan').textContent = '上次扫描: ' + new Date(r.scanned_at).toLocaleTimeString();
     document.getElementById('statOpps').textContent = (r.opportunities || []).length;
-    renderOpportunities(r.opportunities || []);
+    renderOpportunities(r.opportunities || [], r.scanned_at);
   } catch {}
 }
-function renderOpportunities(opps) {
+function renderOpportunities(opps, scannedAt) {
   const c = document.getElementById('oppsList');
   if (!opps || !opps.length) { c.innerHTML = '<div style="text-align:center;padding:20px;color:#94a3b8">暂未发现套利机会</div>'; return; }
   const stratNames = { complement: '互补套利', probability: '概率偏差', market_making: '做市', momentum: '动量', logical: '逻辑套利' };
   const stratColors = { complement: '#22c55e', probability: '#8b5cf6', market_making: '#5b6ef5', momentum: '#f59e0b', logical: '#ec4899' };
+  const tsLabel = scannedAt ? new Date(scannedAt).toLocaleString('zh-CN', { hour12: false }) : '';
   c.innerHTML = opps.map(function(o) {
     const sn = stratNames[o.strategy] || o.strategy;
     const sc = stratColors[o.strategy] || '#5b6ef5';
@@ -384,6 +385,7 @@ function renderOpportunities(opps) {
       + '<div style="font-size:13px;font-weight:600;color:' + sc + ';margin-bottom:2px">[' + sn + '] ' + (o.action || '') + '</div>'
       + '<div style="font-size:12px;color:#cbd5e1;margin-bottom:4px">' + (o.market || '').slice(0, 80) + '</div>'
       + (o.advisory ? '<div style="font-size:11px;color:#94a3b8;font-style:italic">' + o.advisory + '</div>' : '')
+      + (tsLabel ? '<div style="font-size:10px;color:#64748b;margin-top:4px">&#128338; 发现于 ' + tsLabel + '</div>' : '')
       + '</div>'
       + '<div style="text-align:right;flex-shrink:0">'
       + '<div style="font-size:16px;font-weight:700;color:' + profitColor + '">+$' + profit + '</div>'
