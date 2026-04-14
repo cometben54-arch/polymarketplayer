@@ -726,6 +726,19 @@ ${priced.map((m, i) => `${i + 1}. "${m.question}" → YES价格: ${(m.price * 10
 // =============================================
 async function runScan(env: Env) {
   const db = env.DB;
+  try {
+    return await runScanInner(env);
+  } catch (e: any) {
+    // Log fatal scan errors to alerts so they're visible
+    try {
+      await db.prepare("INSERT INTO alerts(level,message) VALUES('critical',?)").bind('扫描失败: ' + (e.message || String(e)).slice(0, 200)).run();
+    } catch {}
+    return { error: e.message || String(e) };
+  }
+}
+
+async function runScanInner(env: Env) {
+  const db = env.DB;
   if ((await getState(db, 'running')) !== 'true' || (await getState(db, 'paused')) === 'true') return { skipped: true };
   const mkts = (await db.prepare('SELECT * FROM watched_markets WHERE active=1').all()).results as any[];
   if (!mkts.length) return { skipped: true, reason: 'no markets' };
@@ -741,35 +754,55 @@ async function runScan(env: Env) {
   const startingCash = parseFloat(await getSetting(db, 'STARTING_CASH', '100'));
   const balance = mode === 'paper' ? await getPaperBalance(db, startingCash) : await getAccountBalance(env);
 
-  // ============= PARALLEL PRICE FETCH (one batch per scan) =============
-  // Fetch all prices/orderbooks for all markets in parallel. Cache for strategies.
+  // ============= OPTIMIZED PRICE FETCH =============
+  // Use orderbook only (single call per token gives bid+ask+depth).
+  // Cloudflare Workers has 50 subrequest limit - we batch carefully.
+  // Per market: 2 orderbook calls (yes+no) = ~24 calls for 12 markets.
   const priceCache: Record<string, { mid: number | null; askY: number | null; bidY: number | null; askN: number | null; bidN: number | null; bookY: any }> = {};
-  await Promise.all(mkts.map(async (m: any) => {
-    if (!m.token_yes) return;
-    const cache: any = { mid: null, askY: null, bidY: null, askN: null, bidN: null, bookY: null };
-    const tasks: Promise<any>[] = [
-      getMidpoint(env, m.token_yes).then(p => cache.mid = p),
-      getPrice(env, m.token_yes, 'BUY').then(p => cache.askY = p),
-      getPrice(env, m.token_yes, 'SELL').then(p => cache.bidY = p),
-      getOrderbook(env, m.token_yes).then(b => cache.bookY = b),
-    ];
-    if (m.token_no) {
-      tasks.push(getPrice(env, m.token_no, 'BUY').then(p => cache.askN = p));
-      tasks.push(getPrice(env, m.token_no, 'SELL').then(p => cache.bidN = p));
-    }
-    await Promise.all(tasks);
-    priceCache[m.condition_id] = cache;
-  }));
 
-  // Record snapshots in parallel (using cached prices)
-  await Promise.all(mkts.map(async (m: any) => {
-    try {
-      const c = priceCache[m.condition_id];
-      if (!c) return;
-      const sp = c.mid != null && c.askN != null ? Math.abs(1 - c.mid - c.askN) : null;
-      await db.prepare('INSERT INTO price_snapshots(condition_id,price_yes,price_no,spread) VALUES(?,?,?,?)').bind(m.condition_id, c.mid, c.askN, sp).run();
-    } catch {}
-  }));
+  // Process markets in batches of 5 to avoid rate limits
+  const BATCH_SIZE = 5;
+  for (let i = 0; i < mkts.length; i += BATCH_SIZE) {
+    const batch = mkts.slice(i, i + BATCH_SIZE);
+    await Promise.all(batch.map(async (m: any) => {
+      if (!m.token_yes) return;
+      const cache: any = { mid: null, askY: null, bidY: null, askN: null, bidN: null, bookY: null };
+      try {
+        // Single orderbook call gives us bid, ask, mid
+        const bookY = await getOrderbook(env, m.token_yes);
+        if (bookY?.bids?.length && bookY?.asks?.length) {
+          cache.bookY = bookY;
+          cache.bidY = parseFloat(bookY.bids[0].price);
+          cache.askY = parseFloat(bookY.asks[0].price);
+          cache.mid = (cache.bidY + cache.askY) / 2;
+        }
+        if (m.token_no) {
+          const bookN = await getOrderbook(env, m.token_no);
+          if (bookN?.bids?.length && bookN?.asks?.length) {
+            cache.bidN = parseFloat(bookN.bids[0].price);
+            cache.askN = parseFloat(bookN.asks[0].price);
+          }
+        }
+      } catch (e: any) {
+        // Log fetch failure for debugging
+        console.error('Price fetch failed for', m.condition_id, e.message);
+      }
+      priceCache[m.condition_id] = cache;
+    }));
+  }
+
+  // Record snapshots (batched to respect subrequest limit)
+  for (let i = 0; i < mkts.length; i += BATCH_SIZE) {
+    const batch = mkts.slice(i, i + BATCH_SIZE);
+    await Promise.all(batch.map(async (m: any) => {
+      try {
+        const c = priceCache[m.condition_id];
+        if (!c) return;
+        const sp = c.mid != null && c.askN != null ? Math.abs(1 - c.mid - c.askN) : null;
+        await db.prepare('INSERT INTO price_snapshots(condition_id,price_yes,price_no,spread) VALUES(?,?,?,?)').bind(m.condition_id, c.mid, c.askN, sp).run();
+      } catch {}
+    }));
+  }
 
   // ============= RUN STRATEGIES IN PARALLEL =============
   const opps: any[] = [];
