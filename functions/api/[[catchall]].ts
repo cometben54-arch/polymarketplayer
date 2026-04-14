@@ -1066,8 +1066,23 @@ app.get('/markets/prices', async c => {
 });
 app.post('/markets', async c => {
   const b = await c.req.json();
-  await c.env.DB.prepare('INSERT OR REPLACE INTO watched_markets(condition_id,question,token_yes,token_no,user_conviction,topic) VALUES(?,?,?,?,?,?)').bind(b.condition_id, b.question, b.token_yes || null, b.token_no || null, b.user_conviction || 0.5, b.topic || 'other').run();
-  return c.json({ status: 'added' });
+  let topic = b.topic;
+  // Auto-fetch topic from Gamma API if not provided or generic
+  if (!topic || topic === 'other') {
+    try {
+      const gamma = await fetch(`${GAMMA(c.env)}/markets?condition_ids=${b.condition_id}`);
+      if (gamma.ok) {
+        const gm: any[] = await gamma.json();
+        if (gm.length > 0) {
+          const fetched = (gm[0].category || gm[0].tag || '').toLowerCase();
+          if (fetched) topic = fetched;
+        }
+      }
+    } catch {}
+    if (!topic) topic = 'other';
+  }
+  await c.env.DB.prepare('INSERT OR REPLACE INTO watched_markets(condition_id,question,token_yes,token_no,user_conviction,topic) VALUES(?,?,?,?,?,?)').bind(b.condition_id, b.question, b.token_yes || null, b.token_no || null, b.user_conviction || 0.5, topic).run();
+  return c.json({ status: 'added', topic });
 });
 app.put('/markets/:id/conviction', async c => {
   const { conviction } = await c.req.json<{ conviction: number }>();
@@ -1196,7 +1211,8 @@ app.post('/markets/resolve-url', async c => {
     if (mktRes.ok) { const mkts: any[] = await mktRes.json();
       if (mkts.length) return c.json({ event: mkts[0].question, slug, markets: mkts.map((m: any) => {
         const [tY, tN] = parseClobTokens(m.clobTokenIds);
-        return { condition_id: m.conditionId || m.condition_id || '', question: m.question || '', token_yes: tY, token_no: tN };
+        const topic = (m.category || m.tag || 'other').toLowerCase();
+        return { condition_id: m.conditionId || m.condition_id || '', question: m.question || '', token_yes: tY, token_no: tN, topic };
       }) });
     }
     return c.json({ error: 'Not found: ' + slug });
