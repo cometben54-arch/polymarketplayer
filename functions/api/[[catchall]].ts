@@ -386,7 +386,7 @@ reasoning: 核心理由`;
     const size = Math.min(dollarBet / price, 100);
     const fee = size * price * feeRate;
     const expectedProfit = size * Math.abs(deviation) - fee;
-    if (expectedProfit < 0.10) return null;
+    if (expectedProfit < 0.01) return null;
     return { strategy: 'probability', action: 'BUY_YES_AI', spread: Math.abs(deviation), profit: expectedProfit,
       confidence: Math.min(Math.abs(deviation) / 0.2, 1), fee_rate: feeRate,
       advisory: `AI估计${(aiProb*100).toFixed(0)}% > 市场${(marketPrice*100).toFixed(0)}% | ${aiReasoning}`,
@@ -400,7 +400,7 @@ reasoning: 核心理由`;
     if (size < 1) return null;
     const fee = size * price * feeRate;
     const expectedProfit = size * Math.abs(deviation) - fee;
-    if (expectedProfit < 0.10) return null;
+    if (expectedProfit < 0.01) return null;
     return { strategy: 'probability', action: 'SELL_YES_AI', spread: Math.abs(deviation), profit: expectedProfit,
       confidence: Math.min(Math.abs(deviation) / 0.2, 1), fee_rate: feeRate,
       advisory: `AI估计${(aiProb*100).toFixed(0)}% < 市场${(marketPrice*100).toFixed(0)}% | ${aiReasoning}`,
@@ -425,7 +425,7 @@ async function _strategyProbabilityLegacy(env: Env, m: any, db: D1Database, trad
     const size = Math.min(dollarBet / price, 100);
     const fee = size * price * getFeeForCategory(m.topic);
     const expectedProfit = size * Math.abs(deviation) - fee;
-    if (expectedProfit < 0.10) return null;
+    if (expectedProfit < 0.01) return null;
     return { strategy: 'probability', action: 'BUY_YES', spread: Math.abs(deviation), profit: expectedProfit,
       confidence: Math.min(Math.abs(deviation) / 0.2, 1),
       advisory: `用户${(m.user_conviction*100).toFixed(0)}% > 市场${(marketPrice*100).toFixed(0)}%`,
@@ -439,7 +439,7 @@ async function _strategyProbabilityLegacy(env: Env, m: any, db: D1Database, trad
     if (size < 1) return null;
     const fee = size * price * getFeeForCategory(m.topic);
     const expectedProfit = size * Math.abs(deviation) - fee;
-    if (expectedProfit < 0.10) return null;
+    if (expectedProfit < 0.01) return null;
     return { strategy: 'probability', action: 'SELL_YES', spread: Math.abs(deviation), profit: expectedProfit,
       confidence: Math.min(Math.abs(deviation) / 0.2, 1),
       advisory: `用户${(m.user_conviction*100).toFixed(0)}% < 市场${(marketPrice*100).toFixed(0)}%, 卖YES (持仓${position.toFixed(0)})`,
@@ -479,7 +479,7 @@ async function strategyMarketMaking(env: Env, m: any, tradeSize: number, cache?:
   const feeSell = revenue * feeRate;
   const profit = revenue - cost - feeBuy - feeSell;
 
-  if (profit < 0.10) return null;
+  if (profit < 0.01) return null;
 
   return { strategy: 'market_making', action: 'MAKE_MARKET', spread: netSpread, profit, fee_rate: feeRate,
     confidence: Math.min(netSpread / 0.06, 1), midPrice: (bestBid + bestAsk) / 2,
@@ -511,11 +511,12 @@ async function strategyMomentum(env: Env, m: any, db: D1Database, tradeSize: num
     if (price === null || price < 0.03 || price > 0.97) return null;
     if (balance < dollarBet) return null;
     const size = Math.min(dollarBet / price, 100);
-    const fee = size * price * getFeeForCategory(m.topic);
+    const feeRate = getFeeForCategory(m.topic);
+    const fee = size * price * feeRate;
     const expectedProfit = size * pctChange * price - fee;
-    if (expectedProfit < 0.10) return null;
+    if (expectedProfit < 0.01) return null;
     return { strategy: 'momentum', action: 'BUY_MOMENTUM', spread: pctChange, profit: expectedProfit,
-      confidence: Math.min(pctChange / 0.1, 1),
+      confidence: Math.min(pctChange / 0.1, 1), fee_rate: feeRate,
       advisory: `上涨${(pctChange*100).toFixed(1)}% (${prev5.toFixed(3)}→${current.toFixed(3)})`,
       legs: [{ token: m.token_yes, side: 'BUY', price, size }] };
   } else {
@@ -526,11 +527,12 @@ async function strategyMomentum(env: Env, m: any, db: D1Database, tradeSize: num
     if (price === null || price < 0.03) return null;
     const size = Math.min(position, 100, dollarBet / price);
     if (size < 1) return null;
-    const fee = size * price * getFeeForCategory(m.topic);
+    const feeRate = getFeeForCategory(m.topic);
+    const fee = size * price * feeRate;
     const expectedProfit = size * pctChange * price - fee;
-    if (expectedProfit < 0.10) return null;
+    if (expectedProfit < 0.01) return null;
     return { strategy: 'momentum', action: 'SELL_MOMENTUM', spread: pctChange, profit: expectedProfit,
-      confidence: Math.min(pctChange / 0.1, 1),
+      confidence: Math.min(pctChange / 0.1, 1), fee_rate: feeRate,
       advisory: `下跌${(pctChange*100).toFixed(1)}%, 卖YES (持仓${position.toFixed(0)})`,
       legs: [{ token: m.token_yes, side: 'SELL', price, size }] };
   }
@@ -612,7 +614,7 @@ async function strategyLogical(env: Env, allMarkets: any[], db: D1Database, trad
         const feeRate = getFeeForCategory(buyMarket.topic);
         const fee = size * buyMarket.price_yes * feeRate;
         const netProfit = size * spread - fee;
-        if (netProfit < 0.10) continue;
+        if (netProfit < 0.01) continue;
 
         opps.push({
           strategy: 'logical', action: 'BUY_UNDERPRICED',
@@ -702,7 +704,7 @@ ${priced.map((m, i) => `${i + 1}. "${m.question}" → YES价格: ${(m.price * 10
       const feeRate = getFeeForCategory(buy.topic);
       const fee = size * buy.price * feeRate;
       const netProfit = size * spread - fee;
-      if (netProfit < 0.10) continue;
+      if (netProfit < 0.01) continue;
 
       opps.push({
         strategy: 'logical', action: 'AI_BUY_UNDERPRICED', spread, profit: netProfit,
@@ -814,11 +816,22 @@ async function runScan(env: Env) {
   await setState(db, 'daily_pnl', dailyPnl.toString());
 
   // Filter: only real arbitrage with valid legs and within risk limits
+  // For fee-free markets (geopolitics), profit threshold = user's MIN_ARBITRAGE_SPREAD in dollars
+  // For other markets, require minimum $0.10 profit to cover fees meaningfully
   const tradableOpps = opps.filter(o => {
     if (!o.legs || o.legs.length === 0) return false;
-    if (o.profit < 0.10 || o.profit > tradeSize * 2) return false;
+    if (o.profit > tradeSize * 2) return false; // sanity check
+
+    // Determine profit threshold based on whether the market is fee-free
+    const isFeefree = (o.fee_rate === 0) ||
+      (typeof o.market === 'string' && o.legs.length > 0 &&
+       (mkts.find((m: any) => m.condition_id === o.condition_id)?.topic || '').toLowerCase().includes('geopolit'));
+    // For fee-free: use user's minSpread (dollars). For others: $0.10 minimum
+    const minProfitThreshold = isFeefree ? Math.max(minSpread * tradeSize, 0.01) : 0.10;
+    if (o.profit < minProfitThreshold) return false;
+
     const totalLegCost = o.legs.reduce((s: number, l: any) => l.side === 'BUY' ? s + l.price * l.size : s, 0);
-    if (totalLegCost > tradeSize) return false; // Hard cap: cost <= single trade limit
+    if (totalLegCost > tradeSize) return false;
     if (currentPosition + totalLegCost > maxPosition) return false;
     return true;
   });
