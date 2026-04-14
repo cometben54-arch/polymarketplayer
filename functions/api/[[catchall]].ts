@@ -173,38 +173,170 @@ async function strategyComplement(env: Env, m: any, minSpread: number, tradeSize
 }
 
 // =============================================
-// STRATEGY 2: Probability Deviation (with balance/position checks)
-// User conviction vs market price — buy if undervalued, sell if you hold overvalued.
+// STRATEGY 2: AI-Powered Probability Analysis
+// Uses AI to analyze:
+// 1. Price history (24-48h trend from snapshots)
+// 2. Market context (question, end date, topic)
+// 3. Bayesian reasoning (prior base rate + evidence)
+// 4. Latest relevant information (if AI supports web search)
+// Returns AI-estimated "true" probability, trades on deviation from market.
+// User conviction is used as WEAK prior, not main signal.
 // =============================================
 async function strategyProbability(env: Env, m: any, db: D1Database, tradeSize: number, balance: number, mode: string): Promise<any|null> {
+  if (!m.token_yes) return null;
+  const marketPrice = await getMidpoint(env, m.token_yes);
+  if (marketPrice === null || marketPrice < 0.05 || marketPrice > 0.95) return null;
+
+  // Rate limit AI calls: only run per market every 30 minutes
+  const cacheKey = 'ai_prob_' + m.condition_id.slice(0, 16);
+  const cached = await getState(db, cacheKey);
+  const now = Math.floor(Date.now() / 1000);
+  let aiProb: number | null = null;
+  let aiReasoning = '';
+
+  if (cached) {
+    try {
+      const parsed = JSON.parse(cached);
+      if (now - parsed.ts < 1800) { // 30 min cache
+        aiProb = parsed.prob;
+        aiReasoning = parsed.reasoning;
+      }
+    } catch {}
+  }
+
+  if (aiProb === null) {
+    // Fetch AI probability analysis
+    const aiKey = await getSetting(db, 'AI_API_KEY');
+    if (!aiKey) return null;
+    const aiProvider = await getSetting(db, 'AI_PROVIDER', 'openai');
+    const aiModel = await getSetting(db, 'AI_MODEL', 'gpt-4o');
+    const aiBaseUrl = await getSetting(db, 'AI_BASE_URL', 'https://api.openai.com/v1');
+
+    // Gather price history (last 48 hours)
+    const snaps = (await db.prepare("SELECT price_yes,recorded_at FROM price_snapshots WHERE condition_id=? AND recorded_at > datetime('now','-2 days') ORDER BY recorded_at ASC LIMIT 100").bind(m.condition_id).all()).results as any[];
+    const priceTrend = snaps.length ? snaps.map(s => (s.price_yes * 100).toFixed(0) + '%').join('→') : '无历史数据';
+
+    const prompt = `你是一位专业的预测市场量化分析师。基于以下信息，给出这个市场 YES 结果的"真实概率"估计。
+
+市场问题: "${m.question}"
+当前市场价格: YES = ${(marketPrice * 100).toFixed(1)}%
+48小时价格走势: ${priceTrend}
+用户主观判断 (弱先验): ${(m.user_conviction * 100).toFixed(0)}%
+
+请运用以下分析方法:
+1. 基于事件性质的贝叶斯先验（历史基率）
+2. 价格走势分析（是否有确认信号或反向信号）
+3. 结合你所了解的最新相关信息（政治、经济、社会等背景）
+4. 数学物理原理（如均值回归、动量效应、羊群效应、消息扩散）
+5. 对于地缘政治/加密货币/经济类事件，考虑宏观因素
+6. 谨慎对待黑天鹅事件
+
+请严格按以下 JSON 格式回复，不要任何其他内容:
+{"prob": 0.XX, "confidence": 0.X, "reasoning": "简短理由(30字内)"}
+
+prob: 你估计的真实概率 (0-1)
+confidence: 你对这个估计的信心 (0-1, 只在>0.7时才会被采用)
+reasoning: 核心理由`;
+
+    try {
+      let content = '';
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (aiProvider === 'anthropic') {
+        headers['x-api-key'] = aiKey;
+        headers['anthropic-version'] = '2023-06-01';
+        const res = await fetch((aiBaseUrl || 'https://api.anthropic.com') + '/v1/messages', {
+          method: 'POST', headers,
+          body: JSON.stringify({ model: aiModel, max_tokens: 300, messages: [{ role: 'user', content: prompt }] })
+        });
+        const data: any = await res.json();
+        content = data.content?.[0]?.text || '';
+      } else {
+        headers['Authorization'] = `Bearer ${aiKey}`;
+        const res = await fetch(aiBaseUrl + '/chat/completions', {
+          method: 'POST', headers,
+          body: JSON.stringify({ model: aiModel, max_tokens: 300, messages: [{ role: 'user', content: prompt }] })
+        });
+        const data: any = await res.json();
+        content = data.choices?.[0]?.message?.content || '';
+      }
+
+      const match = content.match(/\{[\s\S]*?\}/);
+      if (!match) return null;
+      const parsed = JSON.parse(match[0]);
+      if (typeof parsed.prob !== 'number' || parsed.prob < 0 || parsed.prob > 1) return null;
+      if (typeof parsed.confidence !== 'number' || parsed.confidence < 0.7) return null; // Need high confidence
+
+      aiProb = parsed.prob;
+      aiReasoning = parsed.reasoning || '';
+      await setState(db, cacheKey, JSON.stringify({ prob: aiProb, reasoning: aiReasoning, ts: now }));
+    } catch { return null; }
+  }
+
+  if (aiProb === null) return null;
+  const deviation = aiProb - marketPrice;
+  if (Math.abs(deviation) < 0.10) return null; // Need ≥10% deviation
+
+  // Kelly fraction (half-Kelly for safety)
+  const kelly = Math.min(Math.abs(deviation) / 2, 0.15);
+  const dollarBet = Math.min(tradeSize * kelly * 4, balance * 0.08);
+  if (dollarBet < 0.50) return null;
+
+  if (deviation > 0) {
+    // AI thinks YES is underpriced → BUY YES
+    const price = await getPrice(env, m.token_yes, 'BUY');
+    if (price === null || price < 0.05 || price > 0.95) return null;
+    if (balance < dollarBet) return null;
+    const size = Math.min(dollarBet / price, 100);
+    const fee = size * price * TAKER_FEE;
+    const expectedProfit = size * Math.abs(deviation) - fee;
+    if (expectedProfit < 0.10) return null;
+    return { strategy: 'probability', action: 'BUY_YES_AI', spread: Math.abs(deviation), profit: expectedProfit,
+      confidence: Math.min(Math.abs(deviation) / 0.2, 1),
+      advisory: `AI估计${(aiProb*100).toFixed(0)}% > 市场${(marketPrice*100).toFixed(0)}% | ${aiReasoning}`,
+      legs: [{ token: m.token_yes, side: 'BUY', price, size }] };
+  } else {
+    // AI thinks YES is overpriced → only SELL if we hold
+    const position = mode === 'paper' ? await getPaperPosition(db, m.token_yes) : await getTokenPosition(env, m.token_yes);
+    if (position < 1) return null;
+    const price = await getPrice(env, m.token_yes, 'SELL');
+    if (price === null || price < 0.05) return null;
+    const size = Math.min(position, 100, dollarBet / price);
+    if (size < 1) return null;
+    const fee = size * price * TAKER_FEE;
+    const expectedProfit = size * Math.abs(deviation) - fee;
+    if (expectedProfit < 0.10) return null;
+    return { strategy: 'probability', action: 'SELL_YES_AI', spread: Math.abs(deviation), profit: expectedProfit,
+      confidence: Math.min(Math.abs(deviation) / 0.2, 1),
+      advisory: `AI估计${(aiProb*100).toFixed(0)}% < 市场${(marketPrice*100).toFixed(0)}% | ${aiReasoning}`,
+      legs: [{ token: m.token_yes, side: 'SELL', price, size }] };
+  }
+}
+
+// LEGACY: kept the logic inline but not reachable
+async function _strategyProbabilityLegacy(env: Env, m: any, db: D1Database, tradeSize: number, balance: number, mode: string): Promise<any|null> {
   if (!m.token_yes || m.user_conviction === 0.5) return null;
   const marketPrice = await getMidpoint(env, m.token_yes);
   if (marketPrice === null) return null;
   const deviation = m.user_conviction - marketPrice;
   if (Math.abs(deviation) < 0.15) return null;
-
-  // Kelly fraction capped at 25% of tradeSize
   const kelly = Math.min(Math.abs(deviation) / 2, 0.25);
-  const dollarBet = Math.min(tradeSize * kelly, balance * 0.1); // Max 10% of balance
+  const dollarBet = Math.min(tradeSize * kelly, balance * 0.1);
   if (dollarBet < 0.50) return null;
-
   if (deviation > 0) {
-    // User thinks YES is underpriced → BUY YES (requires cash)
     const price = await getPrice(env, m.token_yes, 'BUY');
     if (price === null || price < 0.03 || price > 0.97) return null;
-    if (balance < dollarBet) return null; // Not enough cash
+    if (balance < dollarBet) return null;
     const size = Math.min(dollarBet / price, 100);
     const fee = size * price * TAKER_FEE;
     const expectedProfit = size * Math.abs(deviation) - fee;
     if (expectedProfit < 0.10) return null;
     return { strategy: 'probability', action: 'BUY_YES', spread: Math.abs(deviation), profit: expectedProfit,
       confidence: Math.min(Math.abs(deviation) / 0.2, 1),
-      advisory: `用户${(m.user_conviction*100).toFixed(0)}% > 市场${(marketPrice*100).toFixed(0)}%, 买YES`,
+      advisory: `用户${(m.user_conviction*100).toFixed(0)}% > 市场${(marketPrice*100).toFixed(0)}%`,
       legs: [{ token: m.token_yes, side: 'BUY', price, size }] };
   } else {
-    // User thinks YES is overpriced → only SELL if we hold YES tokens
     const position = mode === 'paper' ? await getPaperPosition(db, m.token_yes) : await getTokenPosition(env, m.token_yes);
-    if (position < 1) return null; // No position to sell
+    if (position < 1) return null;
     const price = await getPrice(env, m.token_yes, 'SELL');
     if (price === null || price < 0.03) return null;
     const size = Math.min(position, 100, dollarBet / price);
