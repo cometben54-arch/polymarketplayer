@@ -241,31 +241,33 @@ async function strategyComplement(env: Env, m: any, minSpread: number, tradeSize
   const pY = cache?.askY ?? await getPrice(env, m.token_yes, 'BUY');
   const pN = cache?.askN ?? await getPrice(env, m.token_no, 'BUY');
   if (pY === null || pN === null) return null;
-  if (pY < 0.03 || pN < 0.03) return null; // Skip extreme prices
+  if (pY < 0.02 || pN < 0.02) return null; // Skip very extreme prices
   const fee = getFeeForCategory(m.topic);
   const totalCost = pY + pN;
   const fees = totalCost * fee * 2; // fees on both legs
   const netProfit = 1 - totalCost - fees;
-  if (netProfit > minSpread) {
+  // ANY positive net profit > 0.001 (0.1¢) is captured
+  if (netProfit > 0.001) {
     const sh = Math.min(tradeSize / totalCost, 100);
     const profit = sh * netProfit;
     if (profit > tradeSize) return null;
     return { strategy: 'complement', action: 'BUY_BOTH', spread: netProfit, profit, confidence: Math.min(netProfit / 0.05, 1),
-      fee_rate: fee,
+      fee_rate: fee, gap: 1 - totalCost,
       legs: [{ token: m.token_yes, side: 'BUY', price: pY, size: sh }, { token: m.token_no, side: 'BUY', price: pN, size: sh }] };
   }
   const bY = cache?.bidY ?? await getPrice(env, m.token_yes, 'SELL');
   const bN = cache?.bidN ?? await getPrice(env, m.token_no, 'SELL');
   if (bY !== null && bN !== null) {
-    if (bY < 0.03 || bN < 0.03) return null;
+    if (bY < 0.02 || bN < 0.02) return null;
     const totalBid = bY + bN;
     const feesS = totalBid * fee * 2;
     const netProfitS = totalBid - 1 - feesS;
-    if (netProfitS > minSpread) {
+    if (netProfitS > 0.001) {
       const sh = Math.min(tradeSize / totalBid, 100);
       const profitS = sh * netProfitS;
       if (profitS > tradeSize) return null;
       return { strategy: 'complement', action: 'SELL_BOTH', spread: netProfitS, profit: profitS, confidence: Math.min(netProfitS / 0.05, 1),
+        fee_rate: fee, gap: totalBid - 1,
         legs: [{ token: m.token_yes, side: 'SELL', price: bY, size: sh }, { token: m.token_no, side: 'SELL', price: bN, size: sh }] };
     }
   }
@@ -461,28 +463,29 @@ async function strategyMarketMaking(env: Env, m: any, tradeSize: number, cache?:
   const bestBid = parseFloat(book.bids[0].price);
   const bestAsk = parseFloat(book.asks[0].price);
   const spread = bestAsk - bestBid;
-  if (spread < 0.05) return null;
-  // Skip extreme prices where size calculation blows up
-  if (bestBid < 0.05 || bestAsk > 0.95) return null;
+  // Lower threshold: 2¢ raw spread (was 5¢)
+  if (spread < 0.02) return null;
+  if (bestBid < 0.03 || bestAsk > 0.97) return null;
 
-  const buyPrice = Math.round((bestBid + 0.01) * 100) / 100;
-  const sellPrice = Math.round((bestAsk - 0.01) * 100) / 100;
+  // Improve quotes by 1¢ on each side (or use minimum tick)
+  const tickSize = 0.01;
+  const buyPrice = Math.round((bestBid + tickSize) * 100) / 100;
+  const sellPrice = Math.round((bestAsk - tickSize) * 100) / 100;
   const netSpread = sellPrice - buyPrice;
-  if (netSpread <= 0.02) return null;
+  if (netSpread <= 0) return null; // No profit possible after improvements
 
-  // Size: cap so neither leg exceeds tradeSize
   const maxSize = Math.min(tradeSize / buyPrice, tradeSize / sellPrice);
-  const size = Math.min(maxSize, 200); // Hard cap 200 shares
+  const size = Math.min(maxSize, 200);
   const revenue = size * sellPrice;
   const cost = size * buyPrice;
-  // Both legs must be within tradeSize
   if (cost > tradeSize * 1.1 || revenue > tradeSize * 3) return null;
   const feeRate = getFeeForCategory(m.topic);
   const feeBuy = cost * feeRate;
   const feeSell = revenue * feeRate;
   const profit = revenue - cost - feeBuy - feeSell;
 
-  if (profit < 0.01) return null;
+  // ANY positive profit > 0.5¢ qualifies (global filter applies later)
+  if (profit < 0.005) return null;
 
   return { strategy: 'market_making', action: 'MAKE_MARKET', spread: netSpread, profit, fee_rate: feeRate,
     confidence: Math.min(netSpread / 0.06, 1), midPrice: (bestBid + bestAsk) / 2,
@@ -857,26 +860,46 @@ async function runScanInner(env: Env) {
   const dailyPnl = todayPnlRes?.pnl || 0;
   await setState(db, 'daily_pnl', dailyPnl.toString());
 
-  // Filter: only real arbitrage with valid legs and within risk limits
-  // For fee-free markets (geopolitics), profit threshold = user's MIN_ARBITRAGE_SPREAD in dollars
-  // For other markets, require minimum $0.10 profit to cover fees meaningfully
-  const tradableOpps = opps.filter(o => {
-    if (!o.legs || o.legs.length === 0) return false;
-    if (o.profit > tradeSize * 2) return false; // sanity check
+  // Filter: only real arbitrage with valid legs and within risk limits.
+  // Use user's MIN_ARBITRAGE_SPREAD × tradeSize for ALL markets (uniform).
+  // Track rejections for diagnostic logging.
+  const filterStats: Record<string, number> = { no_legs: 0, sanity: 0, low_profit: 0, leg_cost: 0, position: 0 };
+  const filteredDetails: any[] = [];
 
-    // Determine profit threshold based on whether the market is fee-free
-    const isFeefree = (o.fee_rate === 0) ||
-      (typeof o.market === 'string' && o.legs.length > 0 &&
-       (mkts.find((m: any) => m.condition_id === o.condition_id)?.topic || '').toLowerCase().includes('geopolit'));
-    // For fee-free: use user's minSpread (dollars). For others: $0.10 minimum
-    const minProfitThreshold = isFeefree ? Math.max(minSpread * tradeSize, 0.01) : 0.10;
-    if (o.profit < minProfitThreshold) return false;
+  const tradableOpps = opps.filter(o => {
+    if (!o.legs || o.legs.length === 0) { filterStats.no_legs++; return false; }
+    if (o.profit > tradeSize * 2) { filterStats.sanity++; filteredDetails.push({ s: o.strategy, m: (o.market || '').slice(0,15), reason: 'sanity', profit: o.profit }); return false; }
+
+    // Use user's threshold uniformly (works for both fee-free and fee markets,
+    // since strategies already deducted fees from o.profit)
+    const minProfitThreshold = Math.max(minSpread * tradeSize, 0.005);
+    if (o.profit < minProfitThreshold) {
+      filterStats.low_profit++;
+      filteredDetails.push({ s: o.strategy, m: (o.market || '').slice(0,15), reason: 'low_profit', profit: +o.profit.toFixed(3), need: +minProfitThreshold.toFixed(3) });
+      return false;
+    }
 
     const totalLegCost = o.legs.reduce((s: number, l: any) => l.side === 'BUY' ? s + l.price * l.size : s, 0);
-    if (totalLegCost > tradeSize) return false;
-    if (currentPosition + totalLegCost > maxPosition) return false;
+    if (totalLegCost > tradeSize * 1.05) { // small tolerance for rounding
+      filterStats.leg_cost++;
+      filteredDetails.push({ s: o.strategy, m: (o.market || '').slice(0,15), reason: 'leg_cost', cost: +totalLegCost.toFixed(2), max: tradeSize });
+      return false;
+    }
+    if (currentPosition + totalLegCost > maxPosition) {
+      filterStats.position++;
+      filteredDetails.push({ s: o.strategy, m: (o.market || '').slice(0,15), reason: 'position' });
+      return false;
+    }
     return true;
   });
+
+  // Save filter diagnostics for debugging
+  await setState(db, 'last_filter_stats', JSON.stringify({
+    total_opps: opps.length, tradable: tradableOpps.length,
+    rejections: filterStats, examples: filteredDetails.slice(0, 5),
+    threshold: Math.max(minSpread * tradeSize, 0.005),
+    ts: Date.now()
+  }));
 
   // Queue best opportunity for separate execution (avoids subrequest limit)
   // Trade execution happens in a separate /api/trade/execute-pending call
@@ -901,12 +924,21 @@ async function runScanInner(env: Env) {
 
   // Always log scan summary so user knows system is alive
   const stratNames: Record<string,string> = { complement: '互补套利', probability: '概率偏差', market_making: '做市', momentum: '动量', logical: '逻辑套利' };
-  const tradeableSummary = tradableOpps.map(o => `[${stratNames[o.strategy] || o.strategy}] ${o.market?.slice(0,20)} $${o.profit.toFixed(2)}`).join('; ');
+  const tradeableSummary = tradableOpps.map(o => `[${stratNames[o.strategy] || o.strategy}] ${o.market?.slice(0,20)} $${o.profit.toFixed(3)}`).join('; ');
   const advisorySummary = opps.filter(o => !o.legs?.length).map(o => `[${stratNames[o.strategy] || o.strategy}] ${o.market?.slice(0,20)} ${o.advisory || ''}`).join('; ');
+  // Show top 3 closest-to-threshold opportunities that got filtered
+  const closeMisses = opps
+    .filter(o => o.legs?.length > 0 && o.profit > 0)
+    .sort((a, b) => b.profit - a.profit)
+    .slice(0, 3)
+    .map(o => `[${stratNames[o.strategy] || o.strategy}] ${o.market?.slice(0,15)} $${o.profit.toFixed(3)}`)
+    .join('; ');
+  const threshold = Math.max(minSpread * tradeSize, 0.005);
   await addAlert(db, 'info',
-    `扫描${mkts.length}市场 | 余额$${balance.toFixed(2)} | 持仓$${currentPosition.toFixed(0)}/$${maxPosition} | 模式:${mode}`
-    + (tradableOpps.length ? ` | 可交易${tradableOpps.length}个: ${tradeableSummary}` : ' | 无可交易机会')
+    `扫描${mkts.length}市场 | 余额$${balance.toFixed(2)} | 持仓$${currentPosition.toFixed(0)}/$${maxPosition} | 阈值$${threshold.toFixed(3)} | 模式:${mode}`
+    + (tradableOpps.length ? ` | ✅可交易${tradableOpps.length}个: ${tradeableSummary}` : ` | 无可交易机会(检测${opps.length}个)`)
     + (traded ? ` | 已${mode === 'paper' ? '模拟' : '真实'}交易[${stratNames[traded.strategy] || traded.strategy}]` : '')
+    + (closeMisses && !tradableOpps.length ? ` | 💡接近: ${closeMisses}` : '')
     + (advisorySummary ? ` | 参考: ${advisorySummary}` : ''));
 
   const result = { scanned: mkts.length, mode, balance: Math.round(balance * 100) / 100, strategies: enabled,
@@ -1526,6 +1558,15 @@ app.post('/trade/execute-pending', async c => {
 app.get('/scan/latest', async c => {
   const cached = await getState(c.env.DB, 'last_scan_result');
   return c.json(cached ? JSON.parse(cached) : { opportunities: [], scanned_at: null });
+});
+// Diagnostic endpoint: shows why opportunities were filtered
+app.get('/scan/diagnostics', async c => {
+  const filterStats = await getState(c.env.DB, 'last_filter_stats');
+  const lastResult = await getState(c.env.DB, 'last_scan_result');
+  return c.json({
+    filter: filterStats ? JSON.parse(filterStats) : null,
+    last_scan: lastResult ? JSON.parse(lastResult) : null,
+  });
 });
 app.get('/fees', async c => c.json({ categories: CATEGORY_FEES, default: DEFAULT_FEE, last_verified: FEES_LAST_VERIFIED }));
 
