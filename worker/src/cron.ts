@@ -55,6 +55,28 @@ export default {
       );
     }
 
+    // Every hour (at minute 0): auto-discover weather markets + cleanup expired
+    if (cronPattern === '0 * * * *') {
+      ctx.waitUntil((async () => {
+        try {
+          // Step 1: Discover new weather markets
+          const discRes = await fetch(`${baseUrl}/api/markets/auto-discover`, { method: 'POST', headers });
+          const discData = await discRes.json();
+          console.log('Auto-discover:', JSON.stringify(discData).slice(0, 300));
+
+          // Wait 5s between operations
+          await new Promise(r => setTimeout(r, 5000));
+
+          // Step 2: Cleanup expired/settled markets
+          const cleanRes = await fetch(`${baseUrl}/api/markets/cleanup`, { method: 'POST', headers });
+          const cleanData = await cleanRes.json();
+          console.log('Cleanup:', JSON.stringify(cleanData).slice(0, 300));
+        } catch (e: any) {
+          console.error('Discover/cleanup failed:', e.message);
+        }
+      })());
+    }
+
     // Daily at 1:00 AM UTC: AI daily summary
     if (cronPattern === '0 1 * * *') {
       ctx.waitUntil(

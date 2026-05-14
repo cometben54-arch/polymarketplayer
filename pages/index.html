@@ -10,7 +10,7 @@
 
 <!-- Header -->
 <div class="header">
-    <h1><span>&#9670;</span> Polymarket 套利机器人 <span style="font-size:10px;color:#64748b;font-weight:400;margin-left:8px">v3.3.0 | 2026-04-25 09:06</span></h1>
+    <h1><span>&#9670;</span> Polymarket 套利机器人 <span style="font-size:10px;color:#64748b;font-weight:400;margin-left:8px">v3.5.0 | 2026-04-25 09:30</span></h1>
     <div class="header-controls">
         <span id="apiDot" style="width:8px;height:8px;border-radius:50%;display:inline-block;background:#ef4444"></span>
         <span id="apiStatus" style="font-size:12px;color:#94a3b8">检测中...</span>
@@ -66,7 +66,18 @@
         <button class="btn btn-ghost btn-sm" onclick="saveStrategies()">保存策略</button>
     </div></div>
 
-    <div class="card"><div class="card-header"><h2>监控市场</h2><div style="display:flex;gap:6px"><button class="btn btn-ghost btn-sm" onclick="loadHotMarkets()" id="btnHotMarkets">热门推荐</button><button class="btn btn-ghost btn-sm" onclick="fixTokens()" id="btnFixTokens">修复数据</button><button class="btn btn-primary btn-sm" onclick="openModal('addMarket')">+ 添加市场</button></div></div><div class="card-body"><div class="table-wrap"><table><thead><tr><th>问题/话题</th><th>YES</th><th>NO</th><th>我的判断</th><th>操作</th></tr></thead><tbody id="marketsTable"></tbody></table></div><div id="noMarkets" style="text-align:center;padding:20px;color:#94a3b8">暂无监控市场</div></div></div>
+    <div class="card"><div class="card-header"><h2>监控市场</h2><div style="display:flex;gap:6px;flex-wrap:wrap">
+      <button class="btn btn-success btn-sm" onclick="autoDiscoverWeather()" id="btnDiscover">自动发现天气</button>
+      <button class="btn btn-warning btn-sm" onclick="cleanupMarkets()" id="btnCleanup">清理过期</button>
+      <button class="btn btn-ghost btn-sm" onclick="loadHotMarkets()" id="btnHotMarkets">热门推荐</button>
+      <button class="btn btn-ghost btn-sm" onclick="fixTokens()" id="btnFixTokens">修复数据</button>
+      <button class="btn btn-ghost btn-sm" onclick="toggleHistory()" id="btnHistory">历史市场</button>
+      <button class="btn btn-primary btn-sm" onclick="openModal('addMarket')">+ 添加市场</button>
+    </div></div><div class="card-body"><div class="table-wrap"><table><thead><tr><th>问题/话题</th><th>YES</th><th>NO</th><th>我的判断</th><th>操作</th></tr></thead><tbody id="marketsTable"></tbody></table></div><div id="noMarkets" style="text-align:center;padding:20px;color:#94a3b8">暂无监控市场</div>
+    <div id="historySection" style="display:none;margin-top:14px;border-top:1px solid #334155;padding-top:14px">
+      <h4 style="font-size:13px;color:#94a3b8;margin-bottom:8px">历史关注市场 (已结算/过期)</h4>
+      <div id="historyList" style="max-height:200px;overflow-y:auto;font-size:12px;color:#64748b"></div>
+    </div></div></div>
 
     <!-- Hot Markets Modal -->
     <div class="modal-backdrop" id="modalHotMarkets"><div class="modal" style="max-width:800px;max-height:85vh;overflow-y:auto">
@@ -347,6 +358,58 @@ async function fixTokens() {
     loadMarkets();
   } catch (e) { addLog('修复失败', 'error'); }
   btn.disabled = false; btn.textContent = '修复数据';
+}
+
+async function autoDiscoverWeather() {
+  const btn = document.getElementById('btnDiscover');
+  btn.disabled = true; btn.textContent = '发现中...';
+  try {
+    const r = await api('/markets/auto-discover', 'POST');
+    if (r.discovered > 0) {
+      addLog('自动发现' + r.discovered + '个天气市场', 'info');
+      alert('新增' + r.discovered + '个天气市场:\n' + (r.markets || []).slice(0, 10).join('\n'));
+      loadMarkets();
+    } else {
+      addLog('未发现新天气市场', 'info');
+      alert('未发现新的天气市场（可能已经全部添加了）');
+    }
+  } catch (e) { addLog('发现失败', 'error'); }
+  btn.disabled = false; btn.textContent = '自动发现天气';
+}
+
+async function cleanupMarkets() {
+  const btn = document.getElementById('btnCleanup');
+  btn.disabled = true; btn.textContent = '清理中...';
+  try {
+    const r = await api('/markets/cleanup', 'POST');
+    if (r.cleaned > 0) {
+      addLog('清理' + r.cleaned + '个已结算市场', 'info');
+      alert('已移除' + r.cleaned + '个过期市场:\n' + (r.markets || []).slice(0, 10).join('\n'));
+      loadMarkets();
+    } else {
+      alert('无需清理，所有市场都在活跃状态');
+    }
+  } catch (e) { addLog('清理失败', 'error'); }
+  btn.disabled = false; btn.textContent = '清理过期';
+}
+
+function toggleHistory() {
+  const s = document.getElementById('historySection');
+  if (s.style.display === 'none') { s.style.display = ''; loadHistory(); }
+  else s.style.display = 'none';
+}
+async function loadHistory() {
+  try {
+    const r = await api('/markets/history');
+    const c = document.getElementById('historyList');
+    if (!r.length) { c.innerHTML = '<div style="color:#64748b">暂无历史市场</div>'; return; }
+    c.innerHTML = r.map(function(m) {
+      return '<div style="padding:4px 0;border-bottom:1px solid rgba(51,65,85,0.3)">'
+        + getFeeBadge(m.topic)
+        + '<span>' + m.question + '</span>'
+        + '<span style="color:#64748b;margin-left:8px;font-size:11px">' + (m.added_at || '') + '</span></div>';
+    }).join('');
+  } catch { document.getElementById('historyList').innerHTML = '<div style="color:#ef4444">加载失败</div>'; }
 }
 
 // Groups
