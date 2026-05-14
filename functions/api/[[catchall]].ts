@@ -498,6 +498,7 @@ async function strategyMarketMaking(env: Env, m: any, tradeSize: number, cache?:
 // =============================================
 async function strategyMomentum(env: Env, m: any, db: D1Database, tradeSize: number, balance: number, mode: string, cache?: any): Promise<any|null> {
   if (!m.token_yes) return null;
+  if (!m.token_yes) return null;
   const snaps = (await db.prepare('SELECT price_yes,recorded_at FROM price_snapshots WHERE condition_id=? ORDER BY recorded_at DESC LIMIT 10').bind(m.condition_id).all()).results as any[];
   if (snaps.length < 3) return null;
   const current = snaps[0]?.price_yes;
@@ -1437,6 +1438,7 @@ app.post('/bot/control', async c => {
 
 // Markets CRUD
 app.get('/markets', async c => c.json((await c.env.DB.prepare('SELECT * FROM watched_markets WHERE active=1 ORDER BY added_at DESC').all()).results));
+app.get('/markets/history', async c => c.json((await c.env.DB.prepare('SELECT * FROM watched_markets WHERE active=0 ORDER BY added_at DESC LIMIT 100').all()).results));
 app.get('/markets/prices', async c => {
   const mkts = (await c.env.DB.prepare('SELECT condition_id,token_yes,token_no FROM watched_markets WHERE active=1').all()).results as any[];
   const results = [];
@@ -1728,6 +1730,110 @@ app.get('/debug/markets', async c => {
     results.push(info);
   }
   return c.json(results);
+});
+
+// =============================================
+// AUTO-DISCOVER: Find and add new weather markets from Polymarket
+// =============================================
+app.post('/markets/auto-discover', async c => {
+  const db = c.env.DB;
+  const added: string[] = [];
+  const searchTerms = ['temperature', 'weather', 'rain', 'snow', 'forecast', 'high temperature', 'low temperature'];
+
+  // Get already-watched condition_ids to avoid duplicates
+  const existing = (await db.prepare('SELECT condition_id FROM watched_markets').all()).results as any[];
+  const existingIds = new Set(existing.map((r: any) => r.condition_id));
+
+  for (const term of searchTerms) {
+    try {
+      const res = await fetch(`${GAMMA(c.env)}/markets?tag=${encodeURIComponent(term)}&limit=20&active=true&closed=false`);
+      if (!res.ok) continue;
+      const markets: any[] = await res.json();
+
+      for (const m of markets) {
+        const cid = m.conditionId || m.condition_id;
+        if (!cid || existingIds.has(cid)) continue;
+
+        const [tY, tN] = parseClobTokens(m.clobTokenIds);
+        if (!tY || !tN) continue;
+
+        const topic = classifyByKeywords(m.question || '', (m.category || m.tag || '').toLowerCase());
+        await db.prepare('INSERT OR IGNORE INTO watched_markets(condition_id,question,token_yes,token_no,topic,active) VALUES(?,?,?,?,?,1)')
+          .bind(cid, m.question || '', tY, tN, topic).run();
+        existingIds.add(cid);
+        added.push(m.question?.slice(0, 50) || cid);
+      }
+      await sleep(1000); // Pace between search terms
+    } catch {}
+  }
+
+  // Also search by slug patterns for weather-heavy categories
+  for (const slug of ['weather', 'temperature', 'climate']) {
+    try {
+      const res = await fetch(`${GAMMA(c.env)}/events?slug=${slug}&limit=10&active=true`);
+      if (!res.ok) continue;
+      const events: any[] = await res.json();
+      for (const evt of events) {
+        if (!evt.markets) continue;
+        for (const m of evt.markets) {
+          const cid = m.conditionId || m.condition_id;
+          if (!cid || existingIds.has(cid)) continue;
+          const [tY, tN] = parseClobTokens(m.clobTokenIds);
+          if (!tY || !tN) continue;
+          const topic = classifyByKeywords(m.question || '', 'weather');
+          await db.prepare('INSERT OR IGNORE INTO watched_markets(condition_id,question,token_yes,token_no,topic,active) VALUES(?,?,?,?,?,1)')
+            .bind(cid, m.question || m.groupItemTitle || '', tY, tN, topic).run();
+          existingIds.add(cid);
+          added.push((m.question || m.groupItemTitle || '').slice(0, 50));
+        }
+      }
+      await sleep(1000);
+    } catch {}
+  }
+
+  if (added.length) {
+    await addAlert(db, 'info', `自动发现${added.length}个天气市场: ${added.slice(0, 5).join('; ')}${added.length > 5 ? '...' : ''}`);
+  }
+
+  return c.json({ discovered: added.length, markets: added });
+});
+
+// =============================================
+// AUTO-CLEANUP: Move settled/expired markets to history (active=0)
+// =============================================
+app.post('/markets/cleanup', async c => {
+  const db = c.env.DB;
+  const mkts = (await db.prepare('SELECT * FROM watched_markets WHERE active=1').all()).results as any[];
+  const cleaned: string[] = [];
+
+  for (const m of mkts) {
+    try {
+      // Check if market is closed/settled via CLOB API
+      const mkt: any = await clobGet(c.env, `/markets/${m.condition_id}`);
+      if (mkt && (mkt.closed === true || mkt.active === false || mkt.accepting_orders === false)) {
+        await db.prepare('UPDATE watched_markets SET active=0 WHERE condition_id=?').bind(m.condition_id).run();
+        cleaned.push(m.question?.slice(0, 40) || m.condition_id);
+        continue;
+      }
+
+      // Also check via Gamma API for more reliable status
+      const gamma = await fetch(`${GAMMA(c.env)}/markets?condition_ids=${m.condition_id}`);
+      if (gamma.ok) {
+        const gm: any[] = await gamma.json();
+        if (gm.length > 0 && (gm[0].closed === true || gm[0].active === false || gm[0].archived === true)) {
+          await db.prepare('UPDATE watched_markets SET active=0 WHERE condition_id=?').bind(m.condition_id).run();
+          cleaned.push(m.question?.slice(0, 40) || m.condition_id);
+        }
+      }
+      await sleep(500);
+    } catch {}
+  }
+
+  if (cleaned.length) {
+    await addAlert(db, 'info', `清理${cleaned.length}个已结算市场: ${cleaned.slice(0, 5).join('; ')}${cleaned.length > 5 ? '...' : ''}`);
+  }
+
+  return c.json({ cleaned: cleaned.length, markets: cleaned });
 });
 
 // Scan & AI
