@@ -60,6 +60,8 @@
             <label style="font-size:12px;cursor:pointer;background:#252840;padding:4px 10px;border-radius:6px"><input type="checkbox" value="market_making" class="strat-cb" style="margin-right:4px" checked> 做市商</label>
             <label style="font-size:12px;cursor:pointer;background:#252840;padding:4px 10px;border-radius:6px"><input type="checkbox" value="momentum" class="strat-cb" style="margin-right:4px" checked> 动量套利</label>
             <label style="font-size:12px;cursor:pointer;background:#252840;padding:4px 10px;border-radius:6px"><input type="checkbox" value="logical" class="strat-cb" style="margin-right:4px" checked> 逻辑套利(AI)</label>
+            <label style="font-size:12px;cursor:pointer;background:#065f46;padding:4px 10px;border-radius:6px"><input type="checkbox" value="weather" class="strat-cb" style="margin-right:4px" checked> 天气套利</label>
+            <label style="font-size:12px;cursor:pointer;background:#7f1d1d;padding:4px 10px;border-radius:6px"><input type="checkbox" value="nobot" class="strat-cb" style="margin-right:4px" checked> No-Bot</label>
         </div></div>
         <button class="btn btn-ghost btn-sm" onclick="saveStrategies()">保存策略</button>
     </div></div>
@@ -386,7 +388,7 @@ async function loadOpportunities() {
 function renderOpportunities(opps, scannedAt) {
   const c = document.getElementById('oppsList');
   if (!opps || !opps.length) { c.innerHTML = '<div style="text-align:center;padding:20px;color:#94a3b8">暂未发现套利机会</div>'; return; }
-  const stratNames = { complement: '互补套利', probability: '概率偏差', market_making: '做市', momentum: '动量', logical: '逻辑套利' };
+  const stratNames = { complement: '互补套利', probability: '概率偏差', market_making: '做市', momentum: '动量', logical: '逻辑套利', weather: '天气套利', nobot: 'No-Bot' };
   const stratColors = { complement: '#22c55e', probability: '#8b5cf6', market_making: '#5b6ef5', momentum: '#f59e0b', logical: '#ec4899' };
   const tsLabel = scannedAt ? new Date(scannedAt).toLocaleString('zh-CN', { hour12: false }) : '';
   c.innerHTML = opps.map(function(o) {
@@ -578,7 +580,7 @@ async function loadStrategyPnl() {
   const grid = document.getElementById('strategyPnlGrid');
   try {
     const d = await api('/trades/pnl-by-strategy');
-    const names = { complement: '互补套利', probability: '概率偏差', market_making: '做市', momentum: '动量', logical: '逻辑套利', manual: '手动', unknown: '其他' };
+    const names = { complement: '互补套利', probability: '概率偏差', market_making: '做市', momentum: '动量', logical: '逻辑套利', weather: '天气套利', nobot: 'No-Bot', manual: '手动', unknown: '其他' };
     const pnl = d.pnl || {};
     const entries = Object.entries(pnl);
     if (!entries.length) { grid.innerHTML = '<div style="color:#fbbf24;font-size:12px;grid-column:1/-1">暂无交易数据</div>'; return; }
