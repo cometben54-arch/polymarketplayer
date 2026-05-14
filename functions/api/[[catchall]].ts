@@ -318,7 +318,7 @@ async function strategyProbability(env: Env, m: any, db: D1Database, tradeSize: 
     const snaps = (await db.prepare("SELECT price_yes,recorded_at FROM price_snapshots WHERE condition_id=? AND recorded_at > datetime('now','-2 days') ORDER BY recorded_at ASC LIMIT 100").bind(m.condition_id).all()).results as any[];
     const priceTrend = snaps.length ? snaps.map(s => (s.price_yes * 100).toFixed(0) + '%').join('→') : '无历史数据';
 
-    const prompt = `你是一位专业的预测市场量化分析师。基于以下信息，给出这个市场 YES 结果的"真实概率"估计。
+    const prompt = `你是一位专业的预测市场量化分析师。基于以下信息，给出这个市场 YES 结果的“真实概率”估计。
 
 市场问题: "${m.question}"
 当前市场价格: YES = ${(marketPrice * 100).toFixed(1)}%
@@ -668,7 +668,7 @@ ${priced.map((m, i) => `${i + 1}. "${m.question}" → YES价格: ${(m.price * 10
 规则:
 - 如果事件A逻辑上蕴含事件B (A发生则B必发生)，那么 P(A) ≤ P(B)
 - 如果事件互斥且穷尽，概率之和应为100%
-- 如果事件有时间范围包含关系（如"6月前" vs "12月前"），较短期限的概率应≤较长期限
+- 如果事件有时间范围包含关系（如“6月前” vs “12月前”），较短期限的概率应≤较长期限
 
 请仅回复JSON数组,格式: [{"buy_idx":0,"sell_idx":1,"reason":"简短理由","confidence":0.8}]
 如果没有矛盾,回复空数组 []
@@ -728,6 +728,196 @@ ${priced.map((m, i) => `${i + 1}. "${m.question}" → YES价格: ${(m.price * 10
 }
 
 // =============================================
+// STRATEGY 6: Weather Forecast Arbitrage
+// Compare Open-Meteo weather forecasts with Polymarket weather market prices.
+// When forecast disagrees with market by >5%, bet on the forecast.
+// Weather forecasts 1-2 days out are ~90% accurate.
+// =============================================
+
+// Location coordinates for weather markets
+const WEATHER_LOCATIONS: Record<string, { lat: number; lon: number }> = {
+  'new york': { lat: 40.71, lon: -74.01 }, 'nyc': { lat: 40.71, lon: -74.01 },
+  'london': { lat: 51.51, lon: -0.13 }, 'los angeles': { lat: 34.05, lon: -118.24 },
+  'chicago': { lat: 41.88, lon: -87.63 }, 'miami': { lat: 25.76, lon: -80.19 },
+  'tokyo': { lat: 35.68, lon: 139.69 }, 'seoul': { lat: 37.57, lon: 126.98 },
+  'paris': { lat: 48.86, lon: 2.35 }, 'berlin': { lat: 52.52, lon: 13.41 },
+  'sydney': { lat: -33.87, lon: 151.21 }, 'dubai': { lat: 25.20, lon: 55.27 },
+  'singapore': { lat: 1.35, lon: 103.82 }, 'mumbai': { lat: 19.08, lon: 72.88 },
+  'toronto': { lat: 43.65, lon: -79.38 }, 'dallas': { lat: 32.78, lon: -96.80 },
+  'houston': { lat: 29.76, lon: -95.37 }, 'phoenix': { lat: 33.45, lon: -112.07 },
+  'denver': { lat: 39.74, lon: -104.99 }, 'atlanta': { lat: 33.75, lon: -84.39 },
+  'san francisco': { lat: 37.77, lon: -122.42 }, 'seattle': { lat: 47.61, lon: -122.33 },
+  'boston': { lat: 42.36, lon: -71.06 }, 'washington': { lat: 38.91, lon: -77.04 },
+  'dc': { lat: 38.91, lon: -77.04 },
+};
+
+function extractWeatherInfo(question: string): { location: string; type: 'temp_high' | 'temp_low' | 'rain' | 'snow' | null; threshold: number | null; date: string | null; coords: { lat: number; lon: number } | null } {
+  const q = question.toLowerCase();
+  let location = '', coords = null;
+  for (const [name, c] of Object.entries(WEATHER_LOCATIONS)) {
+    if (q.includes(name)) { location = name; coords = c; break; }
+  }
+  if (!coords) return { location: '', type: null, threshold: null, date: null, coords: null };
+
+  let type: 'temp_high' | 'temp_low' | 'rain' | 'snow' | null = null;
+  if (q.includes('high') || q.includes('above') || q.includes('over') || q.includes('reach')) type = 'temp_high';
+  else if (q.includes('low') || q.includes('below') || q.includes('under') || q.includes('drop')) type = 'temp_low';
+  else if (q.includes('rain') || q.includes('precipitation') || q.includes('inch')) type = 'rain';
+  else if (q.includes('snow')) type = 'snow';
+
+  // Extract temperature threshold (e.g. "above 80°F", "reach 90")
+  const tempMatch = q.match(/(\d+)\s*°?\s*f/i) || q.match(/(above|over|reach|exceed|below|under|drop)\s+(\d+)/i);
+  const threshold = tempMatch ? parseInt(tempMatch[2] || tempMatch[1]) : null;
+
+  // Extract date
+  const dateMatch = q.match(/(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\w*\s+(\d{1,2})/i);
+  const date = dateMatch ? dateMatch[0] : null;
+
+  return { location, type, threshold, date, coords };
+}
+
+async function strategyWeather(env: Env, m: any, db: D1Database, tradeSize: number, balance: number, mode: string, cache?: any): Promise<any|null> {
+  // Only applies to weather-related markets
+  const q = (m.question || '').toLowerCase();
+  if (!q.includes('temperature') && !q.includes('weather') && !q.includes('rain') && !q.includes('snow') && !q.includes('°f') && !q.includes('high') && !q.includes('forecast')) return null;
+
+  const info = extractWeatherInfo(m.question);
+  if (!info.coords || !info.type || info.threshold === null) return null;
+  if (!m.token_yes) return null;
+
+  const marketPrice = cache?.mid ?? await getMidpoint(env, m.token_yes);
+  if (marketPrice === null || marketPrice < 0.03 || marketPrice > 0.97) return null;
+
+  // Rate limit weather API: once per market per hour
+  const cacheKey = 'weather_' + m.condition_id.slice(0, 16);
+  const cached_wx = await getState(db, cacheKey);
+  const now = Math.floor(Date.now() / 1000);
+  let forecastProb: number | null = null;
+
+  if (cached_wx) {
+    try { const p = JSON.parse(cached_wx); if (now - p.ts < 3600) forecastProb = p.prob; } catch {}
+  }
+
+  if (forecastProb === null) {
+    try {
+      // Fetch 7-day forecast from Open-Meteo (free, no API key needed)
+      const url = `https://api.open-meteo.com/v1/forecast?latitude=${info.coords.lat}&longitude=${info.coords.lon}&daily=temperature_2m_max,temperature_2m_min,precipitation_sum,snowfall_sum&temperature_unit=fahrenheit&forecast_days=7&timezone=auto`;
+      const res = await fetch(url);
+      if (!res.ok) return null;
+      const wx: any = await res.json();
+
+      if (wx.daily) {
+        // Calculate probability based on forecast
+        if (info.type === 'temp_high' && info.threshold && wx.daily.temperature_2m_max) {
+          const maxTemps: number[] = wx.daily.temperature_2m_max;
+          const daysAbove = maxTemps.filter(t => t >= info.threshold!).length;
+          forecastProb = daysAbove / maxTemps.length;
+        } else if (info.type === 'temp_low' && info.threshold && wx.daily.temperature_2m_min) {
+          const minTemps: number[] = wx.daily.temperature_2m_min;
+          const daysBelow = minTemps.filter(t => t <= info.threshold!).length;
+          forecastProb = daysBelow / minTemps.length;
+        } else if (info.type === 'rain' && wx.daily.precipitation_sum) {
+          const rainDays = wx.daily.precipitation_sum.filter((p: number) => p > 0.5).length;
+          forecastProb = rainDays / wx.daily.precipitation_sum.length;
+        } else if (info.type === 'snow' && wx.daily.snowfall_sum) {
+          const snowDays = wx.daily.snowfall_sum.filter((s: number) => s > 0.1).length;
+          forecastProb = snowDays / wx.daily.snowfall_sum.length;
+        }
+      }
+
+      if (forecastProb !== null) {
+        await setState(db, cacheKey, JSON.stringify({ prob: forecastProb, ts: now }));
+      }
+    } catch { return null; }
+  }
+
+  if (forecastProb === null) return null;
+
+  // Need >5% deviation between forecast and market to trade
+  const deviation = forecastProb - marketPrice;
+  if (Math.abs(deviation) < 0.05) return null;
+
+  const feeRate = getFeeForCategory(m.topic);
+  const dollarBet = Math.min(tradeSize, balance * 0.08);
+  if (dollarBet < 0.50) return null;
+
+  if (deviation > 0) {
+    // Forecast says more likely than market → BUY YES
+    const price = cache?.askY ?? await getPrice(env, m.token_yes, 'BUY');
+    if (price === null || price < 0.03 || price > 0.97) return null;
+    if (balance < dollarBet) return null;
+    const size = Math.min(dollarBet / price, 100);
+    const fee = size * price * feeRate;
+    const expectedProfit = size * Math.abs(deviation) - fee;
+    if (expectedProfit < 0.005) return null;
+    return { strategy: 'weather', action: 'BUY_YES_WEATHER', spread: Math.abs(deviation), profit: expectedProfit,
+      confidence: Math.min(Math.abs(deviation) / 0.1, 1), fee_rate: feeRate,
+      advisory: `天气预报${(forecastProb*100).toFixed(0)}% > 市场${(marketPrice*100).toFixed(0)}% | ${info.location} ${info.type}>${info.threshold}`,
+      legs: [{ token: m.token_yes, side: 'BUY', price, size }] };
+  } else {
+    // Forecast says less likely → BUY NO
+    if (!m.token_no) return null;
+    const price = cache?.askN ?? await getPrice(env, m.token_no, 'BUY');
+    if (price === null || price < 0.03 || price > 0.97) return null;
+    if (balance < dollarBet) return null;
+    const size = Math.min(dollarBet / price, 100);
+    const fee = size * price * feeRate;
+    const expectedProfit = size * Math.abs(deviation) - fee;
+    if (expectedProfit < 0.005) return null;
+    return { strategy: 'weather', action: 'BUY_NO_WEATHER', spread: Math.abs(deviation), profit: expectedProfit,
+      confidence: Math.min(Math.abs(deviation) / 0.1, 1), fee_rate: feeRate,
+      advisory: `天气预报${(forecastProb*100).toFixed(0)}% < 市场${(marketPrice*100).toFixed(0)}% | ${info.location} ${info.type}<${info.threshold}`,
+      legs: [{ token: m.token_no, side: 'BUY', price, size }] };
+  }
+}
+
+// =============================================
+// STRATEGY 7: Nothing-Ever-Happens No-Bot
+// Auto-buy NO on non-sports markets where NO price ≤ $0.65.
+// Based on the statistical bias that people overestimate dramatic outcomes.
+// Win rate ~73%, annual return 16-33%.
+// =============================================
+async function strategyNoBot(env: Env, m: any, tradeSize: number, balance: number, cache?: any): Promise<any|null> {
+  if (!m.token_no) return null;
+
+  // Skip sports markets (no-bot doesn't work well on sports)
+  const topic = (m.topic || '').toLowerCase();
+  if (topic.includes('sport') || topic.includes('nba') || topic.includes('nfl') || topic.includes('mlb')) return null;
+
+  // Skip weather markets (handled by weather strategy)
+  const q = (m.question || '').toLowerCase();
+  if (q.includes('temperature') || q.includes('weather') || q.includes('rain') || q.includes('snow') || q.includes('°f')) return null;
+
+  // Skip crypto short-term markets (too volatile for no-bot)
+  if (q.includes('minute') || q.includes('5-min') || q.includes('15-min')) return null;
+
+  // Get NO price
+  const priceNo = cache?.askN ?? await getPrice(env, m.token_no, 'BUY');
+  if (priceNo === null) return null;
+
+  // Only buy NO when it's cheap (≤ 65¢) — high probability of "nothing happens"
+  if (priceNo > 0.65) return null;
+  // But not too cheap (> 5¢) — avoid nearly-certain YES markets
+  if (priceNo < 0.05) return null;
+
+  const feeRate = getFeeForCategory(m.topic);
+  const dollarBet = Math.min(tradeSize * 0.5, balance * 0.03); // Small bets, diversified
+  if (dollarBet < 0.30) return null;
+
+  const size = Math.min(dollarBet / priceNo, 100);
+  const fee = size * priceNo * feeRate;
+  // Expected profit: if NO wins, we get $1 per share. Expected = (1-priceNo) * winRate - fee
+  const estimatedWinRate = 0.73; // Historical no-bot win rate
+  const expectedProfit = size * ((1 - priceNo) * estimatedWinRate - priceNo * (1 - estimatedWinRate)) - fee;
+  if (expectedProfit < 0.005) return null;
+
+  return { strategy: 'nobot', action: 'BUY_NO', spread: 1 - priceNo, profit: expectedProfit,
+    confidence: Math.min((0.65 - priceNo) / 0.3, 1), fee_rate: feeRate,
+    advisory: `No-Bot: NO@${(priceNo*100).toFixed(1)}¢ 期望收益$${expectedProfit.toFixed(3)} | 73%胜率`,
+    legs: [{ token: m.token_no, side: 'BUY', price: priceNo, size }] };
+}
+
+// =============================================
 // SCAN ENGINE: Run all enabled strategies
 // =============================================
 async function runScan(env: Env) {
@@ -751,7 +941,7 @@ async function runScanInner(env: Env) {
 
   const minSpread = parseFloat(await getSetting(db, 'MIN_ARBITRAGE_SPREAD', '0.02'));
   const tradeSize = parseFloat(await getSetting(db, 'MAX_SINGLE_TRADE_USD', '20'));
-  const enabledStr = await getSetting(db, 'ENABLED_STRATEGIES', 'complement,probability,market_making,momentum,logical');
+  const enabledStr = await getSetting(db, 'ENABLED_STRATEGIES', 'complement,probability,market_making,momentum,logical,weather,nobot');
   const enabled = enabledStr.split(',').map(s => s.trim());
   const mode = await getSetting(db, 'TRADING_MODE', 'paper');
   const cooldown = parseInt(await getSetting(db, 'TRADE_COOLDOWN_SEC', '30'));
@@ -831,6 +1021,16 @@ async function runScanInner(env: Env) {
       }
       if (enabled.includes('momentum')) {
         const o = await strategyMomentum(env, m, db, tradeSize, balance, mode, cache);
+        if (o) opps.push({ ...o, market: m.question, condition_id: m.condition_id });
+        await sleep(STRATEGY_PACING_MS);
+      }
+      if (enabled.includes('weather')) {
+        const o = await strategyWeather(env, m, db, tradeSize, balance, mode, cache);
+        if (o) opps.push({ ...o, market: m.question, condition_id: m.condition_id });
+        await sleep(STRATEGY_PACING_MS);
+      }
+      if (enabled.includes('nobot')) {
+        const o = await strategyNoBot(env, m, tradeSize, balance, cache);
         if (o) opps.push({ ...o, market: m.question, condition_id: m.condition_id });
         await sleep(STRATEGY_PACING_MS);
       }
@@ -923,7 +1123,7 @@ async function runScanInner(env: Env) {
   const traded = queued;
 
   // Always log scan summary so user knows system is alive
-  const stratNames: Record<string,string> = { complement: '互补套利', probability: '概率偏差', market_making: '做市', momentum: '动量', logical: '逻辑套利' };
+  const stratNames: Record<string,string> = { complement: '互补套利', probability: '概率偏差', market_making: '做市', momentum: '动量', logical: '逻辑套利', weather: '天气套利', nobot: 'No-Bot' };
   const tradeableSummary = tradableOpps.map(o => `[${stratNames[o.strategy] || o.strategy}] ${o.market?.slice(0,20)} $${o.profit.toFixed(3)}`).join('; ');
   const advisorySummary = opps.filter(o => !o.legs?.length).map(o => `[${stratNames[o.strategy] || o.strategy}] ${o.market?.slice(0,20)} ${o.advisory || ''}`).join('; ');
   // Show top 3 closest-to-threshold opportunities that got filtered
@@ -1224,7 +1424,7 @@ app.get('/bot/status', async c => {
     daily_pnl: parseFloat(await getState(db, 'daily_pnl') || '0'), total_pnl: parseFloat(await getState(db, 'total_pnl') || '0'),
     trading_ready: !!(c.env.POLYMARKET_API_KEY && c.env.POLYMARKET_PRIVATE_KEY),
     mode, starting_cash: startingCash, balance,
-    strategies: (await getSetting(db, 'ENABLED_STRATEGIES', 'complement,probability,market_making,momentum,logical')).split(',') });
+    strategies: (await getSetting(db, 'ENABLED_STRATEGIES', 'complement,probability,market_making,momentum,logical,weather,nobot')).split(',') });
 });
 app.post('/bot/control', async c => {
   const { action } = await c.req.json<{ action: string }>(); const db = c.env.DB;
@@ -1728,7 +1928,7 @@ app.post('/ai-advisory', async c => {
 });
 app.get('/ai-advisory/latest', async c => {
   const r = await c.env.DB.prepare("SELECT * FROM ai_reviews WHERE review_type='advisory' ORDER BY created_at DESC LIMIT 1").first();
-  return c.json(r || { content: '暂无投资建议。系统将在每天凌晨2点自动生成。', created_at: '' });
+  return c.json(r || { content: '暂无投资建议。系统将在每天凌昨2点自动生成。', created_at: '' });
 });
 
 // AI Chat: follow-up conversation based on advisory
