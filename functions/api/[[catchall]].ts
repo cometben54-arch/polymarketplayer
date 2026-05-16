@@ -55,51 +55,73 @@ async function getOrderbook(env: Env, tid: string): Promise<any> { return clobGe
 function sleep(ms: number): Promise<void> { return new Promise(r => setTimeout(r, ms)); }
 
 // --- Account / Position helpers ---
-// Query USDC balance directly from Polygon RPC (most reliable)
+// Query balance via multiple methods
 async function getAccountBalance(env: Env): Promise<number> {
   const addr = env.POLYMARKET_FUNDER_ADDRESS;
-  if (!addr) return 0;
+  const signerAddr = env.POLYMARKET_PRIVATE_KEY ? getSignerAddress(env) : '';
 
-  // USDC.e contract on Polygon (used by Polymarket)
-  const USDC_ADDR = '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174';
-  // ERC20 balanceOf(address) function selector + padded address
-  const data = '0x70a08231' + addr.replace('0x', '').toLowerCase().padStart(64, '0');
-
-  // Try multiple public Polygon RPCs for reliability
-  const rpcs = [
-    'https://polygon-rpc.com',
-    'https://rpc-mainnet.matic.network',
-    'https://polygon-bor-rpc.publicnode.com',
-  ];
-
-  for (const rpc of rpcs) {
+  // Method 1: Try Polymarket Data API for portfolio value
+  if (addr) {
     try {
-      const res = await fetch(rpc, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          jsonrpc: '2.0', id: 1, method: 'eth_call',
-          params: [{ to: USDC_ADDR, data }, 'latest'],
-        }),
-      });
-      if (!res.ok) continue;
-      const json: any = await res.json();
-      if (json.result) {
-        // USDC has 6 decimals
-        const bigInt = BigInt(json.result);
-        return Number(bigInt) / 1e6;
+      const dataUrl = (env.DATA_API_URL || 'https://data-api.polymarket.com').replace(/\/$/, '');
+      const res = await fetch(`${dataUrl}/value?user=${addr}`);
+      if (res.ok) {
+        const d: any = await res.json();
+        const val = parseFloat(d.value || d.portfolio_value || '0');
+        if (val > 0) return val;
       }
     } catch {}
   }
 
-  // Fallback: try Polymarket Data API
-  try {
-    const dataUrl = (env.DATA_API_URL || 'https://data-api.polymarket.com').replace(/\/$/, '');
-    const res = await fetch(`${dataUrl}/value?user=${addr}`);
-    if (res.ok) { const d: any = await res.json(); return parseFloat(d.value || '0'); }
-  } catch {}
+  // Method 2: Query USDC.e on both funder and signer addresses
+  const USDC_ADDR = '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174';
+  const addresses = [addr, signerAddr].filter(a => a);
+  const rpcs = ['https://polygon-bor-rpc.publicnode.com', 'https://polygon-rpc.com', 'https://1rpc.io/matic'];
 
-  return 0;
+  let totalBalance = 0;
+  for (const checkAddr of addresses) {
+    if (!checkAddr) continue;
+    const data = '0x70a08231' + checkAddr.replace('0x', '').toLowerCase().padStart(64, '0');
+    for (const rpc of rpcs) {
+      try {
+        const res = await fetch(rpc, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_call', params: [{ to: USDC_ADDR, data }, 'latest'] }),
+        });
+        if (!res.ok) continue;
+        const json: any = await res.json();
+        if (json.result && json.result !== '0x') {
+          const bal = Number(BigInt(json.result)) / 1e6;
+          if (bal > 0) { totalBalance += bal; break; }
+        }
+      } catch {}
+    }
+  }
+
+  // Method 3: Also check USDC (native, not bridged) contract
+  if (totalBalance === 0) {
+    const USDC_NATIVE = '0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359';
+    for (const checkAddr of addresses) {
+      if (!checkAddr) continue;
+      const data = '0x70a08231' + checkAddr.replace('0x', '').toLowerCase().padStart(64, '0');
+      for (const rpc of rpcs) {
+        try {
+          const res = await fetch(rpc, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_call', params: [{ to: USDC_NATIVE, data }, 'latest'] }),
+          });
+          if (!res.ok) continue;
+          const json: any = await res.json();
+          if (json.result && json.result !== '0x') {
+            const bal = Number(BigInt(json.result)) / 1e6;
+            if (bal > 0) { totalBalance += bal; break; }
+          }
+        } catch {}
+      }
+    }
+  }
+
+  return totalBalance;
 }
 
 async function getTokenPosition(env: Env, tokenId: string): Promise<number> {
@@ -937,8 +959,18 @@ async function runScan(env: Env) {
 async function runScanInner(env: Env) {
   const db = env.DB;
   if ((await getState(db, 'running')) !== 'true' || (await getState(db, 'paused')) === 'true') return { skipped: true };
-  const mkts = (await db.prepare('SELECT * FROM watched_markets WHERE active=1').all()).results as any[];
-  if (!mkts.length) return { skipped: true, reason: 'no markets' };
+  const allMkts = (await db.prepare('SELECT * FROM watched_markets WHERE active=1').all()).results as any[];
+  if (!allMkts.length) return { skipped: true, reason: 'no markets' };
+
+  // Cap at 20 markets per scan (20×2 orderbook = 40 subrequests, under 50 limit)
+  const MAX_PER_SCAN = 20;
+  let mkts = allMkts;
+  if (allMkts.length > MAX_PER_SCAN) {
+    let off = parseInt(await getState(db, 'scan_offset') || '0');
+    mkts = [];
+    for (let i = 0; i < MAX_PER_SCAN; i++) mkts.push(allMkts[(off + i) % allMkts.length]);
+    await setState(db, 'scan_offset', String((off + MAX_PER_SCAN) % allMkts.length));
+  }
 
   const minSpread = parseFloat(await getSetting(db, 'MIN_ARBITRAGE_SPREAD', '0.02'));
   const tradeSize = parseFloat(await getSetting(db, 'MAX_SINGLE_TRADE_USD', '20'));
@@ -947,9 +979,15 @@ async function runScanInner(env: Env) {
   const mode = await getSetting(db, 'TRADING_MODE', 'paper');
   const cooldown = parseInt(await getSetting(db, 'TRADE_COOLDOWN_SEC', '30'));
 
-  // Get current available balance (paper or real)
+  // Get balance: paper=simulated, real=try API then fallback to STARTING_CASH
   const startingCash = parseFloat(await getSetting(db, 'STARTING_CASH', '100'));
-  const balance = mode === 'paper' ? await getPaperBalance(db, startingCash) : await getAccountBalance(env);
+  let balance: number;
+  if (mode === 'paper') {
+    balance = await getPaperBalance(db, startingCash);
+  } else {
+    balance = await getAccountBalance(env);
+    if (balance <= 0) balance = startingCash; // Fallback when RPC/API fails
+  }
 
   // ============= PACED PRICE FETCH =============
   // Spread API requests over time to avoid rate limiting.
@@ -1136,7 +1174,7 @@ async function runScanInner(env: Env) {
     .join('; ');
   const threshold = Math.max(minSpread * tradeSize, 0.005);
   await addAlert(db, 'info',
-    `扫描${mkts.length}市场 | 余额$${balance.toFixed(2)} | 持仓$${currentPosition.toFixed(0)}/$${maxPosition} | 阈值$${threshold.toFixed(3)} | 模式:${mode}`
+    `扫描${mkts.length}/${allMkts.length}市场 | 余额$${balance.toFixed(2)} | 持仓$${currentPosition.toFixed(0)}/$${maxPosition} | 阈值$${threshold.toFixed(3)} | 模式:${mode}`
     + (tradableOpps.length ? ` | ✅可交易${tradableOpps.length}个: ${tradeableSummary}` : ` | 无可交易机会(检测${opps.length}个)`)
     + (traded ? ` | 已${mode === 'paper' ? '模拟' : '真实'}交易[${stratNames[traded.strategy] || traded.strategy}]` : '')
     + (closeMisses && !tradableOpps.length ? ` | 💡接近: ${closeMisses}` : '')
