@@ -1295,11 +1295,22 @@ async function runScanInner(env: Env) {
   // Filter: only real arbitrage with valid legs and within risk limits.
   // Use user's MIN_ARBITRAGE_SPREAD × tradeSize for ALL markets (uniform).
   // Track rejections for diagnostic logging.
-  const filterStats: Record<string, number> = { no_legs: 0, sanity: 0, low_profit: 0, leg_cost: 0, position: 0 };
+  const filterStats: Record<string, number> = { no_legs: 0, sanity: 0, low_profit: 0, leg_cost: 0, position: 0, danger: 0 };
   const filteredDetails: any[] = [];
 
   const tradableOpps = opps.filter(o => {
     if (!o.legs || o.legs.length === 0) { filterStats.no_legs++; return false; }
+
+    // Risk rating check: NEVER trade danger markets
+    const risk = rateMarketRisk(o.market || '', o.topic || '');
+    if (risk.level === 'danger') {
+      filterStats.danger++;
+      filteredDetails.push({ s: o.strategy, m: (o.market || '').slice(0,15), reason: 'danger:' + risk.reason });
+      return false;
+    }
+    // Attach risk info to opportunity for downstream use
+    o.risk = risk;
+
     if (o.profit > tradeSize * 2) { filterStats.sanity++; filteredDetails.push({ s: o.strategy, m: (o.market || '').slice(0,15), reason: 'sanity', profit: o.profit }); return false; }
 
     // Use user's threshold uniformly (works for both fee-free and fee markets,

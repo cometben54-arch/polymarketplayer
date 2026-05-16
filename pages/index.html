@@ -10,7 +10,7 @@
 
 <!-- Header -->
 <div class="header">
-    <h1><span>&#9670;</span> Polymarket 套利机器人 <span style="font-size:10px;color:#64748b;font-weight:400;margin-left:8px">v3.8.0 | 2026-05-16 01:30</span></h1>
+    <h1><span>&#9670;</span> Polymarket 套利机器人 <span style="font-size:10px;color:#64748b;font-weight:400;margin-left:8px">v3.9.0 | 2026-05-16 02:00</span></h1>
     <div class="header-controls">
         <span id="apiDot" style="width:8px;height:8px;border-radius:50%;display:inline-block;background:#ef4444"></span>
         <span id="apiStatus" style="font-size:12px;color:#94a3b8">检测中...</span>
@@ -218,8 +218,9 @@ async function loadMarkets() {
   if (!markets.length) { t.innerHTML = ''; e.style.display = ''; document.getElementById('statMarkets').textContent = '0'; return; }
   e.style.display = 'none'; document.getElementById('statMarkets').textContent = markets.length;
   t.innerHTML = markets.map(function(m) {
-    return '<tr><td title="' + m.condition_id + '" style="max-width:240px">'
-      + getFeeBadge(m.topic)
+    var risk = getRiskBadge(m.question, m.topic);
+    return '<tr><td title="' + m.condition_id + '" style="max-width:260px">'
+      + risk + getFeeBadge(m.topic)
       + '<span>' + m.question + '</span>'
       + '<div style="font-size:11px;color:#64748b">' + (m.topic || '') + '</div></td>'
       + '<td id="py_' + m.condition_id.slice(0,10) + '" style="color:#22c55e">...</td>'
@@ -301,6 +302,16 @@ function getFeeRate(topic) {
   if (t.includes('econom')) return 0.015;
   if (t.includes('crypto') || t.includes('bitcoin') || t.includes('ethereum')) return 0.018;
   return CATEGORY_FEES[t] != null ? CATEGORY_FEES[t] : 0.0125;
+}
+function getRiskBadge(question, topic) {
+  var q = (question || '').toLowerCase();
+  // Danger keywords
+  var dangerKW = ['election result','who will win','impeach','coup','invade','invasion','declare war','nuclear launch','earthquake above','tsunami','pandemic','rug pull','scandal','arrest','jail','jesus','alien','prophecy'];
+  for (var i = 0; i < dangerKW.length; i++) if (q.includes(dangerKW[i])) return '<span style="display:inline-block;background:#dc2626;color:#fff;font-size:8px;font-weight:700;padding:1px 4px;border-radius:3px;margin-right:3px;vertical-align:middle">危</span>';
+  // Safe keywords
+  var safeKW = ['cpi','inflation rate','nonfarm','unemployment rate','gdp','interest rate','temperature','weather','rain','snow','earnings','revenue','box office','release date','stanley cup','nba finals'];
+  for (var j = 0; j < safeKW.length; j++) if (q.includes(safeKW[j])) return '<span style="display:inline-block;background:#16a34a;color:#fff;font-size:8px;font-weight:700;padding:1px 4px;border-radius:3px;margin-right:3px;vertical-align:middle">安</span>';
+  return '<span style="display:inline-block;background:#d97706;color:#fff;font-size:8px;font-weight:700;padding:1px 4px;border-radius:3px;margin-right:3px;vertical-align:middle">慎</span>';
 }
 function getFeeBadge(topic) {
   const fee = getFeeRate(topic);
