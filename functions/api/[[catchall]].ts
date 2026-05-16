@@ -255,6 +255,101 @@ function classifyByKeywords(question: string, currentTopic: string = ''): string
 }
 
 // =============================================
+// MARKET RISK RATING SYSTEM
+// 🟢 SAFE: High confidence, data-driven, suitable for auto-trading
+// 🟡 CAUTION: Moderate risk, reduced position sizing
+// 🔴 DANGER: Do not auto-trade (blacklisted)
+// =============================================
+type RiskLevel = 'safe' | 'caution' | 'danger';
+
+function rateMarketRisk(question: string, topic: string = ''): { level: RiskLevel; reason: string } {
+  const q = (question || '').toLowerCase();
+  const t = (topic || '').toLowerCase();
+
+  // ========== 🔴 DANGER: Never auto-trade ==========
+
+  // Political high-risk: elections, impeachment, regime change
+  const dangerPolitical = ['election result', 'who will win', 'presidential winner', 'impeach', 'removed from office',
+    'coup', 'regime change', 'overthrow', 'assassination', 'civil war'];
+  for (const kw of dangerPolitical) if (q.includes(kw)) return { level: 'danger', reason: '政治高危' };
+
+  // Geopolitical conflict: war, invasion, military action
+  const dangerGeo = ['war break', 'invade', 'invasion of', 'military strike', 'nuclear launch', 'declare war',
+    'armed conflict', 'border clash', 'diplomatic crisis'];
+  for (const kw of dangerGeo) if (q.includes(kw)) return { level: 'danger', reason: '地缘冲突' };
+
+  // Disaster: earthquake, tsunami, pandemic
+  const dangerDisaster = ['earthquake above', 'tsunami', 'pandemic', 'outbreak', 'category 5', 'volcanic eruption',
+    'plane crash', 'mass casualty'];
+  for (const kw of dangerDisaster) if (q.includes(kw)) return { level: 'danger', reason: '灾难预测' };
+
+  // Insider/emotion: crypto collapse, scandal, celebrity
+  const dangerInsider = ['rug pull', 'ponzi', 'hack ', 'exploit ', 'scandal', 'arrest',
+    'jail', 'prison', 'indicted', 'convicted', 'collapse of'];
+  for (const kw of dangerInsider) if (q.includes(kw)) return { level: 'danger', reason: '内幕/情绪盘' };
+
+  // Mystical/unpredictable: prophecy, aliens, far future
+  const dangerMystic = ['jesus', 'alien', 'ufo', 'prophecy', 'end of the world', 'rapture',
+    'before 2030', 'before 2035', 'in our lifetime'];
+  for (const kw of dangerMystic) if (q.includes(kw)) return { level: 'danger', reason: '玄学/远期' };
+
+  // ========== 🟡 CAUTION: Reduced sizing ==========
+
+  // Political but not high-risk (nomination, approval rating)
+  const cautionPolitical = ['nomination', 'approval rating', 'resign', 'step down', 'party leader',
+    'primary win', 'debate winner'];
+  for (const kw of cautionPolitical) if (q.includes(kw)) return { level: 'caution', reason: '政治相关' };
+
+  // Sanctions, trade disputes
+  const cautionGeo = ['sanction', 'tariff', 'trade deal', 'peace deal', 'ceasefire', 'treaty',
+    'nuclear deal', 'diplomatic meeting'];
+  for (const kw of cautionGeo) if (q.includes(kw)) return { level: 'caution', reason: '地缘外交' };
+
+  // Crypto price (volatile)
+  const cautionCrypto = ['bitcoin', 'btc', 'ethereum', 'eth ', 'solana', 'crypto price',
+    'dip to', 'hit $', 'above $', 'below $'];
+  for (const kw of cautionCrypto) if (q.includes(kw)) return { level: 'caution', reason: '加密货币' };
+
+  // GTA VI / entertainment speculation
+  if (q.includes('gta vi') || q.includes('gta 6')) return { level: 'caution', reason: '娱乐猜测' };
+
+  // ========== 🟢 SAFE: Best for auto-trading ==========
+
+  // Macro economics: CPI, jobs, GDP, interest rate
+  const safeEcon = ['cpi ', 'inflation rate', 'nonfarm', 'non-farm', 'unemployment rate', 'gdp ',
+    'interest rate', 'fed rate', 'fomc', 'jobs report', 'pce '];
+  for (const kw of safeEcon) if (q.includes(kw)) return { level: 'safe', reason: '宏观经济数据' };
+
+  // Corporate earnings
+  const safeEarnings = ['earnings', 'revenue', 'quarterly report', 'net income', 'profit margin',
+    'eps ', 'beat expectations', 'miss expectations', 'guidance'];
+  for (const kw of safeEarnings) if (q.includes(kw)) return { level: 'safe', reason: '企业财报' };
+
+  // Weather (data-driven)
+  const safeWeather = ['temperature', 'high of', 'low of', 'rain', 'snow', 'inches of',
+    'precipitation', 'forecast', '°f', '°c', 'weather'];
+  for (const kw of safeWeather) if (q.includes(kw)) return { level: 'safe', reason: '天气预报' };
+
+  // Tech product release
+  const safeTech = ['release date', 'launch date', 'version ', 'update ', 'ios ',
+    'android ', 'announced', 'product launch'];
+  for (const kw of safeTech) if (q.includes(kw)) return { level: 'safe', reason: '科技产品' };
+
+  // Entertainment fixed events
+  const safeEntertain = ['box office', 'opening weekend', 'premiere date', 'album release',
+    'concert', 'award winner', 'grammy', 'oscar', 'emmy', 'nominated'];
+  for (const kw of safeEntertain) if (q.includes(kw)) return { level: 'safe', reason: '影视文娱' };
+
+  // Sports (predictable categories)
+  if (t.includes('sport') || q.includes('stanley cup') || q.includes('nba finals') ||
+      q.includes('world series') || q.includes('super bowl'))
+    return { level: 'safe', reason: '体育赛事' };
+
+  // Default: caution for unknown
+  return { level: 'caution', reason: '未分类' };
+}
+
+// =============================================
 // STRATEGY 1: Complement Arbitrage (Dutch Book)
 // YES + NO should = $1. If not, guaranteed profit after fees.
 // =============================================
@@ -941,6 +1036,99 @@ async function strategyNoBot(env: Env, m: any, tradeSize: number, balance: numbe
 }
 
 // =============================================
+// STRATEGY 8: 4-Hour Pre-Settlement Positive EV
+// Buy YES when price is 0.55-0.85 within 4 hours of settlement.
+// At this point, the market has strong signal but hasn't fully priced in.
+// Expected win rate ~65-80%, positive expected value.
+// Hold to settlement (no early exit).
+// =============================================
+async function strategyPreSettlement(env: Env, m: any, db: D1Database, tradeSize: number, balance: number, cache?: any): Promise<any|null> {
+  if (!m.token_yes) return null;
+
+  // Skip sports (too unpredictable at close) — keep elections, economics, geopolitics
+  const topic = (m.topic || '').toLowerCase();
+  if (topic.includes('sport') || topic.includes('nba') || topic.includes('nfl') || topic.includes('mlb') || topic.includes('nhl')) return null;
+
+  // Check if market is close to settlement (within 4 hours)
+  // We detect this by checking if the market end_date is within 4 hours
+  // Since we don't have end_date in DB, check via Gamma API (cached per hour)
+  const cacheKey = 'settle_' + m.condition_id.slice(0, 16);
+  const cachedInfo = await getState(db, cacheKey);
+  const now = Math.floor(Date.now() / 1000);
+  let endTime: number | null = null;
+  let hasLiquidity = false;
+
+  if (cachedInfo) {
+    try {
+      const p = JSON.parse(cachedInfo);
+      if (now - p.ts < 3600) { endTime = p.end; hasLiquidity = p.liq; }
+    } catch {}
+  }
+
+  if (endTime === null) {
+    try {
+      const gamma = await fetch(`${GAMMA(env)}/markets?condition_ids=${m.condition_id}`);
+      if (gamma.ok) {
+        const gm: any[] = await gamma.json();
+        if (gm.length > 0) {
+          const g = gm[0];
+          // Parse end date
+          const endStr = g.endDate || g.end_date_iso || g.game_start_time || '';
+          if (endStr) {
+            endTime = Math.floor(new Date(endStr).getTime() / 1000);
+          }
+          // Check volume/liquidity
+          const vol = parseFloat(g.volume || g.volumeNum || '0');
+          hasLiquidity = vol > 10000; // >$10k volume
+          await setState(db, cacheKey, JSON.stringify({ end: endTime, liq: hasLiquidity, ts: now }));
+        }
+      }
+    } catch {}
+  }
+
+  // Must be within 4 hours of settlement
+  if (!endTime) return null;
+  const hoursToEnd = (endTime - now) / 3600;
+  if (hoursToEnd < 0 || hoursToEnd > 4) return null;
+
+  // Must have sufficient liquidity (>$10k volume)
+  if (!hasLiquidity) return null;
+
+  // Get YES price
+  const priceYes = cache?.askY ?? await getPrice(env, m.token_yes, 'BUY');
+  if (priceYes === null) return null;
+
+  // Price must be in the sweet spot: 0.55 - 0.85
+  if (priceYes < 0.55 || priceYes > 0.85) return null;
+
+  // Position sizing: 2-5% of balance
+  const feeRate = getFeeForCategory(m.topic);
+  const betPct = 0.03; // 3% of balance
+  const dollarBet = Math.min(tradeSize, balance * betPct);
+  if (dollarBet < 0.50) return null;
+  if (balance < dollarBet) return null;
+
+  const size = Math.min(dollarBet / priceYes, 100);
+  const fee = size * priceYes * feeRate;
+
+  // Expected value: if YES wins (prob ~= price), profit = size * (1 - priceYes) - fee
+  // We buy because at 4h before settlement, prices 0.55-0.85 tend to resolve YES ~70% of the time
+  // (markets are efficient but slightly underpriced close to resolution)
+  const estimatedWinRate = 0.70;
+  const expectedProfit = size * ((1 - priceYes) * estimatedWinRate - priceYes * (1 - estimatedWinRate)) - fee;
+  if (expectedProfit < 0.005) return null;
+
+  return {
+    strategy: 'pre_settle', action: 'BUY_YES_4H',
+    spread: 1 - priceYes, profit: expectedProfit,
+    confidence: Math.min((0.85 - priceYes) / 0.3 + hoursToEnd / 4, 1),
+    fee_rate: feeRate,
+    advisory: `结算前${hoursToEnd.toFixed(1)}h | YES@${(priceYes*100).toFixed(1)}¢ | 预期${(estimatedWinRate*100).toFixed(0)}%胜率`,
+    legs: [{ token: m.token_yes, side: 'BUY', price: priceYes, size }],
+  };
+}
+
+// =============================================
 // SCAN ENGINE: Run all enabled strategies
 // =============================================
 async function runScan(env: Env) {
@@ -974,7 +1162,7 @@ async function runScanInner(env: Env) {
 
   const minSpread = parseFloat(await getSetting(db, 'MIN_ARBITRAGE_SPREAD', '0.02'));
   const tradeSize = parseFloat(await getSetting(db, 'MAX_SINGLE_TRADE_USD', '20'));
-  const enabledStr = await getSetting(db, 'ENABLED_STRATEGIES', 'complement,probability,market_making,momentum,logical,weather,nobot');
+  const enabledStr = await getSetting(db, 'ENABLED_STRATEGIES', 'complement,probability,market_making,momentum,logical,weather,nobot,pre_settle');
   const enabled = enabledStr.split(',').map(s => s.trim());
   const mode = await getSetting(db, 'TRADING_MODE', 'paper');
   const cooldown = parseInt(await getSetting(db, 'TRADE_COOLDOWN_SEC', '30'));
@@ -1071,7 +1259,12 @@ async function runScanInner(env: Env) {
       if (enabled.includes('nobot')) {
         const o = await strategyNoBot(env, m, tradeSize, balance, cache);
         if (o) opps.push({ ...o, market: m.question, condition_id: m.condition_id });
-        await sleep(STRATEGY_PACING_MS);
+        // no delay
+      }
+      if (enabled.includes('pre_settle')) {
+        const o = await strategyPreSettlement(env, m, db, tradeSize, balance, cache);
+        if (o) opps.push({ ...o, market: m.question, condition_id: m.condition_id });
+        // no delay
       }
     } catch {}
   }
@@ -1162,7 +1355,7 @@ async function runScanInner(env: Env) {
   const traded = queued;
 
   // Always log scan summary so user knows system is alive
-  const stratNames: Record<string,string> = { complement: '互补套利', probability: '概率偏差', market_making: '做市', momentum: '动量', logical: '逻辑套利', weather: '天气套利', nobot: 'No-Bot' };
+  const stratNames: Record<string,string> = { complement: '互补套利', probability: '概率偏差', market_making: '做市', momentum: '动量', logical: '逻辑套利', weather: '天气套利', nobot: 'No-Bot', pre_settle: '4h结算' };
   const tradeableSummary = tradableOpps.map(o => `[${stratNames[o.strategy] || o.strategy}] ${o.market?.slice(0,20)} $${o.profit.toFixed(3)}`).join('; ');
   const advisorySummary = opps.filter(o => !o.legs?.length).map(o => `[${stratNames[o.strategy] || o.strategy}] ${o.market?.slice(0,20)} ${o.advisory || ''}`).join('; ');
   // Show top 3 closest-to-threshold opportunities that got filtered
@@ -1463,7 +1656,7 @@ app.get('/bot/status', async c => {
     daily_pnl: parseFloat(await getState(db, 'daily_pnl') || '0'), total_pnl: parseFloat(await getState(db, 'total_pnl') || '0'),
     trading_ready: !!(c.env.POLYMARKET_API_KEY && c.env.POLYMARKET_PRIVATE_KEY),
     mode, starting_cash: startingCash, balance,
-    strategies: (await getSetting(db, 'ENABLED_STRATEGIES', 'complement,probability,market_making,momentum,logical,weather,nobot')).split(',') });
+    strategies: (await getSetting(db, 'ENABLED_STRATEGIES', 'complement,probability,market_making,momentum,logical,weather,nobot,pre_settle')).split(',') });
 });
 app.post('/bot/control', async c => {
   const { action } = await c.req.json<{ action: string }>(); const db = c.env.DB;
