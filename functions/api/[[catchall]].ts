@@ -1975,20 +1975,49 @@ app.get('/debug/markets', async c => {
 });
 
 // =============================================
-// AUTO-DISCOVER: Find and add new weather markets from Polymarket
+// AUTO-DISCOVER: Smart market discovery across ALL profitable categories
+// Searches: Weather, Economics, Finance, Earnings, Entertainment, Culture, Politics, Crypto
+// Plus top 30 highest-volume active markets
+// Scores by: volume + safety rating + fee advantage
+// Filters out danger-rated markets
+// Adds up to 10 best markets per run
+// Runs every 6 hours via cron
 // =============================================
 app.post('/markets/auto-discover', async c => {
   const db = c.env.DB;
   const added: string[] = [];
-  const searchTerms = ['temperature', 'weather', 'rain', 'snow', 'forecast', 'high temperature', 'low temperature'];
+  const MAX_NEW = 10; // Add up to 10 new markets per run
 
   // Get already-watched condition_ids to avoid duplicates
   const existing = (await db.prepare('SELECT condition_id FROM watched_markets').all()).results as any[];
   const existingIds = new Set(existing.map((r: any) => r.condition_id));
 
-  for (const term of searchTerms) {
+  // Search categories: weather + economics + entertainment + politics + finance + crypto + general
+  const searchQueries = [
+    // Weather (high edge)
+    { url: '/markets?tag=temperature&limit=15&active=true&closed=false' },
+    { url: '/markets?tag=weather&limit=15&active=true&closed=false' },
+    // Economics/Finance (data-driven, safe)
+    { url: '/markets?tag=economics&limit=15&active=true&closed=false' },
+    { url: '/markets?tag=finance&limit=15&active=true&closed=false' },
+    { url: '/markets?tag=earnings&limit=10&active=true&closed=false' },
+    // Entertainment (predictable)
+    { url: '/markets?tag=entertainment&limit=10&active=true&closed=false' },
+    { url: '/markets?tag=culture&limit=10&active=true&closed=false' },
+    // Politics (caution but liquid)
+    { url: '/markets?tag=politics&limit=10&active=true&closed=false' },
+    // Crypto (volatile but high volume)
+    { url: '/markets?tag=crypto&limit=10&active=true&closed=false' },
+    // Top 30 highest-volume active markets (any category)
+    { url: '/markets?limit=30&active=true&closed=false&order=volume24hr&ascending=false' },
+  ];
+
+  // Collect all candidate markets with scoring
+  const candidates: { cid: string; question: string; tY: string; tN: string; topic: string; score: number }[] = [];
+
+  for (const query of searchQueries) {
     try {
-      const res = await fetch(`${GAMMA(c.env)}/markets?tag=${encodeURIComponent(term)}&limit=20&active=true&closed=false`);
+      const res = await fetch(`${GAMMA(c.env)}${query.url}`);
       if (!res.ok) continue;
       const markets: any[] = await res.json();
 
@@ -1999,42 +2028,45 @@ app.post('/markets/auto-discover', async c => {
         const [tY, tN] = parseClobTokens(m.clobTokenIds);
         if (!tY || !tN) continue;
 
-        const topic = classifyByKeywords(m.question || '', (m.category || m.tag || '').toLowerCase());
-        await db.prepare('INSERT OR IGNORE INTO watched_markets(condition_id,question,token_yes,token_no,topic,active) VALUES(?,?,?,?,?,1)')
-          .bind(cid, m.question || '', tY, tN, topic).run();
-        existingIds.add(cid);
-        added.push(m.question?.slice(0, 50) || cid);
+        // Skip if already a candidate
+        if (candidates.some(c => c.cid === cid)) continue;
+
+        const question = m.question || '';
+        const topic = classifyByKeywords(question, (m.category || m.tag || '').toLowerCase());
+
+        // Filter out danger-rated markets
+        const risk = rateMarketRisk(question, topic);
+        if (risk.level === 'danger') continue;
+
+        // Score: volume + safety rating + fee advantage
+        const volume = parseFloat(m.volume24hr || m.volume || '0');
+        const volumeScore = Math.min(volume / 5000, 20); // Up to 20 points for volume
+        const safetyScore = risk.level === 'safe' ? 15 : risk.level === 'caution' ? 5 : 0;
+        const feeRate = getFeeForCategory(topic);
+        const feeScore = feeRate === 0 ? 10 : feeRate <= 0.01 ? 5 : 0; // Bonus for low/no fees
+        const score = volumeScore + safetyScore + feeScore;
+
+        candidates.push({ cid, question, tY, tN, topic, score });
       }
-      await sleep(1000); // Pace between search terms
+      await sleep(1000); // Pace between search queries
     } catch {}
   }
 
-  // Also search by slug patterns for weather-heavy categories
-  for (const slug of ['weather', 'temperature', 'climate']) {
+  // Sort by score descending, take top MAX_NEW
+  candidates.sort((a, b) => b.score - a.score);
+  const toAdd = candidates.slice(0, MAX_NEW);
+
+  for (const c of toAdd) {
     try {
-      const res = await fetch(`${GAMMA(c.env)}/events?slug=${slug}&limit=10&active=true`);
-      if (!res.ok) continue;
-      const events: any[] = await res.json();
-      for (const evt of events) {
-        if (!evt.markets) continue;
-        for (const m of evt.markets) {
-          const cid = m.conditionId || m.condition_id;
-          if (!cid || existingIds.has(cid)) continue;
-          const [tY, tN] = parseClobTokens(m.clobTokenIds);
-          if (!tY || !tN) continue;
-          const topic = classifyByKeywords(m.question || '', 'weather');
-          await db.prepare('INSERT OR IGNORE INTO watched_markets(condition_id,question,token_yes,token_no,topic,active) VALUES(?,?,?,?,?,1)')
-            .bind(cid, m.question || m.groupItemTitle || '', tY, tN, topic).run();
-          existingIds.add(cid);
-          added.push((m.question || m.groupItemTitle || '').slice(0, 50));
-        }
-      }
-      await sleep(1000);
+      await db.prepare('INSERT OR IGNORE INTO watched_markets(condition_id,question,token_yes,token_no,topic,active) VALUES(?,?,?,?,?,1)')
+        .bind(c.cid, c.question, c.tY, c.tN, c.topic).run();
+      existingIds.add(c.cid);
+      added.push(c.question.slice(0, 50) || c.cid);
     } catch {}
   }
 
   if (added.length) {
-    await addAlert(db, 'info', `自动发现${added.length}个天气市场: ${added.slice(0, 5).join('; ')}${added.length > 5 ? '...' : ''}`);
+    await addAlert(db, 'info', `自动发现${added.length}个市场: ${added.slice(0, 5).join('; ')}${added.length > 5 ? '...' : ''}`);
   }
 
   return c.json({ discovered: added.length, markets: added });

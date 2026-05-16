@@ -55,11 +55,11 @@ export default {
       );
     }
 
-    // Every hour (at minute 0): auto-discover weather markets + cleanup expired
-    if (cronPattern === '0 * * * *') {
+    // Every 6 hours: auto-discover new markets (5-10 per run) + cleanup expired
+    if (cronPattern === '0 */6 * * *') {
       ctx.waitUntil((async () => {
         try {
-          // Step 1: Discover new weather markets
+          // Step 1: Discover high-liquidity markets across all categories
           const discRes = await fetch(`${baseUrl}/api/markets/auto-discover`, { method: 'POST', headers });
           const discData = await discRes.json();
           console.log('Auto-discover:', JSON.stringify(discData).slice(0, 300));
