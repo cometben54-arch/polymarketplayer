@@ -998,40 +998,43 @@ async function strategyWeather(env: Env, m: any, db: D1Database, tradeSize: numb
 async function strategyNoBot(env: Env, m: any, tradeSize: number, balance: number, cache?: any): Promise<any|null> {
   if (!m.token_no) return null;
 
-  // Skip sports markets (no-bot doesn't work well on sports)
+  // Skip sports markets only (no-bot doesn't work on sports outcomes)
   const topic = (m.topic || '').toLowerCase();
-  if (topic.includes('sport') || topic.includes('nba') || topic.includes('nfl') || topic.includes('mlb')) return null;
+  if (topic.includes('sport') || topic.includes('nba') || topic.includes('nfl') || topic.includes('mlb') || topic.includes('nhl')) return null;
 
-  // Skip weather markets (handled by weather strategy)
+  // Skip crypto short-term markets (too volatile)
   const q = (m.question || '').toLowerCase();
-  if (q.includes('temperature') || q.includes('weather') || q.includes('rain') || q.includes('snow') || q.includes('°f')) return null;
+  if (q.includes('5-min') || q.includes('15-min') || q.includes('minute')) return null;
 
-  // Skip crypto short-term markets (too volatile for no-bot)
-  if (q.includes('minute') || q.includes('5-min') || q.includes('15-min')) return null;
+  // Skip danger-rated markets
+  const risk = rateMarketRisk(m.question || '', m.topic || '');
+  if (risk.level === 'danger') return null;
 
   // Get NO price
   const priceNo = cache?.askN ?? await getPrice(env, m.token_no, 'BUY');
   if (priceNo === null) return null;
 
-  // Only buy NO when it's cheap (≤ 65¢) — high probability of "nothing happens"
-  if (priceNo > 0.65) return null;
-  // But not too cheap (> 5¢) — avoid nearly-certain YES markets
+  // EXPANDED range: buy NO when price is 5¢ to 80¢ (was 5¢-65¢)
+  // 80¢ NO = 20¢ YES = market thinks 20% chance event happens
+  // "Nothing happens" wins 73% of the time for non-sports
+  if (priceNo > 0.80) return null;
   if (priceNo < 0.05) return null;
 
   const feeRate = getFeeForCategory(m.topic);
-  const dollarBet = Math.min(tradeSize * 0.5, balance * 0.03); // Small bets, diversified
-  if (dollarBet < 0.30) return null;
+  // Position sizing: 2-4% of balance, scaled by confidence
+  const betPct = priceNo < 0.50 ? 0.04 : 0.02; // Cheaper NO = more confident = bigger bet
+  const dollarBet = Math.min(tradeSize, balance * betPct);
+  if (dollarBet < 0.20) return null;
 
   const size = Math.min(dollarBet / priceNo, 100);
   const fee = size * priceNo * feeRate;
-  // Expected profit: if NO wins, we get $1 per share. Expected = (1-priceNo) * winRate - fee
-  const estimatedWinRate = 0.73; // Historical no-bot win rate
+  const estimatedWinRate = priceNo < 0.50 ? 0.78 : 0.68; // Cheaper NO = higher win rate
   const expectedProfit = size * ((1 - priceNo) * estimatedWinRate - priceNo * (1 - estimatedWinRate)) - fee;
-  if (expectedProfit < 0.005) return null;
+  if (expectedProfit < 0.001) return null; // Any positive EV is good
 
   return { strategy: 'nobot', action: 'BUY_NO', spread: 1 - priceNo, profit: expectedProfit,
-    confidence: Math.min((0.65 - priceNo) / 0.3, 1), fee_rate: feeRate,
-    advisory: `No-Bot: NO@${(priceNo*100).toFixed(1)}¢ 期望收益$${expectedProfit.toFixed(3)} | 73%胜率`,
+    confidence: Math.min((0.80 - priceNo) / 0.4, 1), fee_rate: feeRate,
+    advisory: `No-Bot: NO@${(priceNo*100).toFixed(1)}¢ EV$${expectedProfit.toFixed(3)} | ${risk.reason} | ${(estimatedWinRate*100).toFixed(0)}%胜`,
     legs: [{ token: m.token_no, side: 'BUY', price: priceNo, size }] };
 }
 
@@ -1315,7 +1318,8 @@ async function runScanInner(env: Env) {
 
     // Use user's threshold uniformly (works for both fee-free and fee markets,
     // since strategies already deducted fees from o.profit)
-    const minProfitThreshold = Math.max(minSpread * tradeSize, 0.005);
+    // Ultra-low threshold: any opportunity with positive EV ($0.001+)
+    const minProfitThreshold = 0.001;
     if (o.profit < minProfitThreshold) {
       filterStats.low_profit++;
       filteredDetails.push({ s: o.strategy, m: (o.market || '').slice(0,15), reason: 'low_profit', profit: +o.profit.toFixed(3), need: +minProfitThreshold.toFixed(3) });
@@ -2224,6 +2228,69 @@ app.get('/debug/balance', async c => {
     paper_balance: paperBalance,
     starting_cash: startingCash,
   });
+});
+
+// Debug: deep strategy diagnosis - tests each strategy on first 5 markets and reports WHY each fails
+app.get('/debug/strategies', async c => {
+  const db = c.env.DB;
+  const mkts = (await db.prepare('SELECT * FROM watched_markets WHERE active=1 LIMIT 5').all()).results as any[];
+  const balance = 100;
+  const tradeSize = parseFloat(await getSetting(db, 'MAX_SINGLE_TRADE_USD', '5'));
+  const minSpread = parseFloat(await getSetting(db, 'MIN_ARBITRAGE_SPREAD', '0.02'));
+  const results: any[] = [];
+
+  for (const m of mkts) {
+    const mResult: any = { question: m.question?.slice(0, 40), topic: m.topic, token_yes: !!m.token_yes, token_no: !!m.token_no };
+
+    // Get prices
+    try {
+      if (m.token_yes) {
+        const book = await getOrderbook(c.env, m.token_yes);
+        if (book?.bids?.length && book?.asks?.length) {
+          mResult.yes_bid = parseFloat(book.bids[0].price);
+          mResult.yes_ask = parseFloat(book.asks[0].price);
+          mResult.yes_spread = mResult.yes_ask - mResult.yes_bid;
+        } else {
+          mResult.yes_error = 'no orderbook data';
+        }
+      }
+      if (m.token_no) {
+        const book = await getOrderbook(c.env, m.token_no);
+        if (book?.bids?.length && book?.asks?.length) {
+          mResult.no_bid = parseFloat(book.bids[0].price);
+          mResult.no_ask = parseFloat(book.asks[0].price);
+        }
+      }
+    } catch (e: any) { mResult.price_error = e.message; }
+
+    // Test complement
+    if (mResult.yes_ask != null && mResult.no_ask != null) {
+      const totalAsk = mResult.yes_ask + mResult.no_ask;
+      const fee = getFeeForCategory(m.topic);
+      const gap = 1 - totalAsk - totalAsk * fee * 2;
+      mResult.complement = { total_ask: totalAsk, fee_pct: fee, net_gap: gap, would_trigger: gap > 0.001 };
+    }
+
+    // Test market making
+    if (mResult.yes_spread != null) {
+      mResult.market_making = { spread: mResult.yes_spread, min_needed: 0.02, would_trigger: mResult.yes_spread >= 0.02 };
+    }
+
+    // Test nobot
+    if (mResult.no_ask != null) {
+      const topic = (m.topic || '').toLowerCase();
+      const isSports = topic.includes('sport');
+      mResult.nobot = { no_price: mResult.no_ask, max_price: 0.65, is_sports: isSports,
+        would_trigger: mResult.no_ask <= 0.65 && mResult.no_ask >= 0.05 && !isSports };
+    }
+
+    // Risk rating
+    mResult.risk = rateMarketRisk(m.question || '', m.topic || '');
+
+    results.push(mResult);
+  }
+
+  return c.json({ markets_tested: results.length, settings: { tradeSize, minSpread, balance, threshold: Math.max(minSpread * tradeSize, 0.005) }, results });
 });
 
 // Debug: test if Polymarket CLOB is reachable + check for geo-blocking
