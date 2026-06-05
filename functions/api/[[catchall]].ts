@@ -406,7 +406,11 @@ async function strategyProbability(env: Env, m: any, db: D1Database, tradeSize: 
   const marketPrice = cache?.mid ?? await getMidpoint(env, m.token_yes);
   if (marketPrice === null || marketPrice < 0.05 || marketPrice > 0.95) return null;
 
-  // Rate limit AI calls: only run per market every 30 minutes
+  // Pre-filter: skip danger-rated markets (they'll be filtered out in risk check anyway)
+  const risk = rateMarketRisk(m.question || '', m.topic || '');
+  if (risk.level === 'danger') return null;
+
+  // Adaptive AI cache: extend TTL when price is stable or last AI signal was weak
   const cacheKey = 'ai_prob_' + m.condition_id.slice(0, 16);
   const cached = await getState(db, cacheKey);
   const now = Math.floor(Date.now() / 1000);
@@ -416,7 +420,18 @@ async function strategyProbability(env: Env, m: any, db: D1Database, tradeSize: 
   if (cached) {
     try {
       const parsed = JSON.parse(cached);
-      if (now - parsed.ts < 1800) { // 30 min cache
+      // Adaptive TTL based on price stability and signal strength
+      const lastDeviation = parsed.prob !== undefined ? Math.abs(parsed.prob - marketPrice) : 1;
+      const priceMoved = parsed.lastMarketPrice !== undefined ? Math.abs(marketPrice - parsed.lastMarketPrice) : 1;
+      let cacheTTL: number;
+      if (priceMoved < 0.03 && lastDeviation < 0.10) {
+        cacheTTL = 21600; // 6 hours - no signal, price stable
+      } else if (priceMoved < 0.05) {
+        cacheTTL = 14400; // 4 hours - price relatively stable
+      } else {
+        cacheTTL = 3600;  // 1 hour - notable movement, check sooner
+      }
+      if (now - parsed.ts < cacheTTL) {
         aiProb = parsed.prob;
         aiReasoning = parsed.reasoning;
       }
@@ -424,11 +439,11 @@ async function strategyProbability(env: Env, m: any, db: D1Database, tradeSize: 
   }
 
   if (aiProb === null) {
-    // Fetch AI probability analysis
+    // Fetch AI probability analysis (use fast/cheap model to reduce cost)
     const aiKey = await getSetting(db, 'AI_API_KEY');
     if (!aiKey) return null;
     const aiProvider = await getSetting(db, 'AI_PROVIDER', 'openai');
-    const aiModel = await getSetting(db, 'AI_MODEL', 'gpt-4o');
+    const aiModel = await getSetting(db, 'AI_MODEL_FAST', '') || await getSetting(db, 'AI_MODEL', 'gpt-4o-mini');
     const aiBaseUrl = await getSetting(db, 'AI_BASE_URL', 'https://api.openai.com/v1');
 
     // Gather price history (last 48 hours)
@@ -487,7 +502,7 @@ reasoning: 核心理由`;
 
       aiProb = parsed.prob;
       aiReasoning = parsed.reasoning || '';
-      await setState(db, cacheKey, JSON.stringify({ prob: aiProb, reasoning: aiReasoning, ts: now }));
+      await setState(db, cacheKey, JSON.stringify({ prob: aiProb, reasoning: aiReasoning, ts: now, lastMarketPrice: marketPrice }));
     } catch { return null; }
   }
 
@@ -758,10 +773,10 @@ async function strategyLogical(env: Env, allMarkets: any[], db: D1Database, trad
 
 // AI-enhanced logical arbitrage: uses AI to find deeper logical relationships
 async function strategyLogicalAI(env: Env, allMarkets: any[], db: D1Database, tradeSize: number, balance: number, mode: string): Promise<any[]> {
-  // Only run AI check once per hour (expensive)
+  // Only run AI check once per 4 hours (expensive, relationships change slowly)
   const lastAILogical = await getState(db, 'last_ai_logical');
   const now = Math.floor(Date.now() / 1000);
-  if (lastAILogical && now - parseInt(lastAILogical) < 3600) return [];
+  if (lastAILogical && now - parseInt(lastAILogical) < 14400) return [];
 
   const aiKey = await getSetting(db, 'AI_API_KEY');
   if (!aiKey) return [];
@@ -1230,16 +1245,32 @@ async function runScanInner(env: Env) {
   // Small delays between strategies to spread DB writes evenly.
   const opps: any[] = [];
   const STRATEGY_PACING_MS = 500; // 0.5s between strategy types for one market
+  const aiSkipSet = new Set<string>(); // Skip AI for markets with non-AI signals
 
   for (const m of mkts) {
     const cache = priceCache[m.condition_id];
     try {
       if (enabled.includes('complement')) {
         const o = await strategyComplement(env, m, minSpread, tradeSize, cache);
-        if (o) opps.push({ ...o, market: m.question, condition_id: m.condition_id });
+        if (o) { opps.push({ ...o, market: m.question, condition_id: m.condition_id }); aiSkipSet.add(m.condition_id); }
         await sleep(STRATEGY_PACING_MS);
       }
-      if (enabled.includes('probability')) {
+      // Run non-AI strategies before probability to build skip set
+      if (enabled.includes('weather')) {
+        const o = await strategyWeather(env, m, db, tradeSize, balance, mode, cache);
+        if (o) { opps.push({ ...o, market: m.question, condition_id: m.condition_id }); aiSkipSet.add(m.condition_id); }
+        await sleep(STRATEGY_PACING_MS);
+      }
+      if (enabled.includes('nobot')) {
+        const o = await strategyNoBot(env, m, tradeSize, balance, cache);
+        if (o) { opps.push({ ...o, market: m.question, condition_id: m.condition_id }); aiSkipSet.add(m.condition_id); }
+      }
+      if (enabled.includes('pre_settle')) {
+        const o = await strategyPreSettlement(env, m, db, tradeSize, balance, cache);
+        if (o) { opps.push({ ...o, market: m.question, condition_id: m.condition_id }); aiSkipSet.add(m.condition_id); }
+      }
+      // AI probability: skip if cheaper strategies already found a signal for this market
+      if (enabled.includes('probability') && !aiSkipSet.has(m.condition_id)) {
         const o = await strategyProbability(env, m, db, tradeSize, balance, mode, cache);
         if (o) opps.push({ ...o, market: m.question, condition_id: m.condition_id });
         await sleep(STRATEGY_PACING_MS);
@@ -1253,21 +1284,6 @@ async function runScanInner(env: Env) {
         const o = await strategyMomentum(env, m, db, tradeSize, balance, mode, cache);
         if (o) opps.push({ ...o, market: m.question, condition_id: m.condition_id });
         await sleep(STRATEGY_PACING_MS);
-      }
-      if (enabled.includes('weather')) {
-        const o = await strategyWeather(env, m, db, tradeSize, balance, mode, cache);
-        if (o) opps.push({ ...o, market: m.question, condition_id: m.condition_id });
-        await sleep(STRATEGY_PACING_MS);
-      }
-      if (enabled.includes('nobot')) {
-        const o = await strategyNoBot(env, m, tradeSize, balance, cache);
-        if (o) opps.push({ ...o, market: m.question, condition_id: m.condition_id });
-        // no delay
-      }
-      if (enabled.includes('pre_settle')) {
-        const o = await strategyPreSettlement(env, m, db, tradeSize, balance, cache);
-        if (o) opps.push({ ...o, market: m.question, condition_id: m.condition_id });
-        // no delay
       }
     } catch {}
   }
@@ -1909,7 +1925,7 @@ app.get('/settings', async c => {
 });
 app.put('/settings', async c => {
   const { settings } = await c.req.json<{ settings: Record<string, string> }>(); const db = c.env.DB;
-  const dbKeys = ['MAX_POSITION_SIZE_USD','DAILY_LOSS_LIMIT_USD','MAX_SINGLE_TRADE_USD','MIN_ARBITRAGE_SPREAD','POLL_INTERVAL','AI_PROVIDER','AI_API_KEY','AI_MODEL','AI_BASE_URL','TRADING_MODE','ENABLED_STRATEGIES','TRADE_COOLDOWN_SEC','AI_PROVIDERS_JSON','AI_ACTIVE_PROVIDER','STARTING_CASH'];
+  const dbKeys = ['MAX_POSITION_SIZE_USD','DAILY_LOSS_LIMIT_USD','MAX_SINGLE_TRADE_USD','MIN_ARBITRAGE_SPREAD','POLL_INTERVAL','AI_PROVIDER','AI_API_KEY','AI_MODEL','AI_MODEL_FAST','AI_BASE_URL','TRADING_MODE','ENABLED_STRATEGIES','TRADE_COOLDOWN_SEC','AI_PROVIDERS_JSON','AI_ACTIVE_PROVIDER','STARTING_CASH'];
   for (const [k, v] of Object.entries(settings)) { if (dbKeys.includes(k) && v && !v.includes('****')) await db.prepare('INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)').bind(k, v).run(); }
   return c.json({ status: 'saved' }); });
 
