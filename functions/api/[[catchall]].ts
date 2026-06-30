@@ -1188,15 +1188,22 @@ const TEAM_ALIASES: Record<string, string[]> = {
   'czechia': ['czech republic'],
 };
 function teamInText(team: string, text: string): boolean {
+  return teamIndexInText(team, text) >= 0;
+}
+// Index of the first occurrence of a team (or alias) in text; -1 if absent.
+function teamIndexInText(team: string, text: string): number {
   const t = normalizeTeam(team);
-  if (t && text.includes(t)) return true;
+  let idx = t ? text.indexOf(t) : -1;
   for (const [canon, aliases] of Object.entries(TEAM_ALIASES)) {
     if (t === canon || aliases.includes(t)) {
-      if (text.includes(canon)) return true;
-      for (const a of aliases) if (text.includes(a)) return true;
+      const candidates = [canon, ...aliases];
+      for (const c of candidates) {
+        const i = text.indexOf(c);
+        if (i >= 0 && (idx < 0 || i < idx)) idx = i;
+      }
     }
   }
-  return false;
+  return idx;
 }
 
 // Fetch + cache de-vigged World Cup match probabilities from The Odds API.
@@ -1271,6 +1278,23 @@ function classifyWorldCupMarket(question: string, game: any): { type: 'advance' 
   if (/\b(win|beat|defeat|wins|in 90|regulation|full time|90 minutes)\b/.test(q)) {
     if (isHome && !isAway) return { type: 'win90', side: 'home' };
     if (isAway && !isHome) return { type: 'win90', side: 'away' };
+    // Both teams named, e.g. "Will France beat Canada?" — YES backs the subject
+    // (the team named before the "beat/defeat/win against" verb).
+    if (isHome && isAway) {
+      const beatMatch = /\b(beat|beats|defeat|defeats|win against|wins against|to beat|over)\b/.exec(q);
+      const hIdx = teamIndexInText(game.home, q);
+      const aIdx = teamIndexInText(game.away, q);
+      if (beatMatch) {
+        // Subject is the team appearing before the verb.
+        const verbIdx = beatMatch.index;
+        const homeBefore = hIdx >= 0 && hIdx < verbIdx;
+        const awayBefore = aIdx >= 0 && aIdx < verbIdx;
+        if (homeBefore && !awayBefore) return { type: 'win90', side: 'home' };
+        if (awayBefore && !homeBefore) return { type: 'win90', side: 'away' };
+      }
+      // Fallback: "Will A win vs B?" / "A vs B" → first-named team is the subject.
+      if (hIdx >= 0 && aIdx >= 0) return { type: 'win90', side: hIdx < aIdx ? 'home' : 'away' };
+    }
   }
   return null;
 }
