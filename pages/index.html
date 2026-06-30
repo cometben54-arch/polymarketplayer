@@ -63,6 +63,7 @@
             <label style="font-size:12px;cursor:pointer;background:#065f46;padding:4px 10px;border-radius:6px"><input type="checkbox" value="weather" class="strat-cb" style="margin-right:4px" checked> 天气套利</label>
             <label style="font-size:12px;cursor:pointer;background:#7f1d1d;padding:4px 10px;border-radius:6px"><input type="checkbox" value="nobot" class="strat-cb" style="margin-right:4px" checked> No-Bot</label>
             <label style="font-size:12px;cursor:pointer;background:#4c1d95;padding:4px 10px;border-radius:6px"><input type="checkbox" value="pre_settle" class="strat-cb" style="margin-right:4px" checked> 4h结算</label>
+            <label style="font-size:12px;cursor:pointer;background:#1e3a8a;padding:4px 10px;border-radius:6px"><input type="checkbox" value="worldcup" class="strat-cb" style="margin-right:4px"> 世界杯淘汰赛</label>
         </div></div>
         <button class="btn btn-ghost btn-sm" onclick="saveStrategies()">保存策略</button>
     </div></div>
@@ -198,6 +199,10 @@
     <div style="background:#1e293b;border-radius:8px;padding:14px;margin-bottom:16px"><h4 style="font-size:14px;margin-bottom:10px;color:#60a5fa">风险控制 (可修改)</h4>
         <div class="form-row"><div class="form-group"><label>最大持仓</label><input type="number" class="form-control setting-input" data-key="MAX_POSITION_SIZE_USD"></div><div class="form-group"><label>日亏损限额</label><input type="number" class="form-control setting-input" data-key="DAILY_LOSS_LIMIT_USD"></div></div>
         <div class="form-row"><div class="form-group"><label>单笔上限</label><input type="number" class="form-control setting-input" data-key="MAX_SINGLE_TRADE_USD"></div><div class="form-group"><label>最小价差</label><input type="number" class="form-control setting-input" data-key="MIN_ARBITRAGE_SPREAD" step="0.005"></div></div></div>
+    <div style="background:#1e293b;border-radius:8px;padding:14px;margin-bottom:16px"><h4 style="font-size:14px;margin-bottom:10px;color:#60a5fa">世界杯淘汰赛策略</h4><small style="color:#94a3b8;font-size:11px;display:block;margin-bottom:8px">用外部博彩去水赔率计算 edge。需要 The Odds API key（the-odds-api.com，免费档每月500次）。只挂 maker，单场最多 $5。</small>
+        <div class="form-group"><label>Odds API Key</label><input type="password" class="form-control setting-input" data-key="WORLDCUP_ODDS_API_KEY" placeholder="the-odds-api.com 的 API Key"></div>
+        <div class="form-row"><div class="form-group"><label>Sport Key</label><input type="text" class="form-control setting-input" data-key="WORLDCUP_SPORT_KEY" placeholder="soccer_fifa_world_cup"></div><div class="form-group"><label>赔率区域</label><input type="text" class="form-control setting-input" data-key="WORLDCUP_ODDS_REGIONS" placeholder="us,uk,eu"></div></div>
+        <small style="color:#64748b;font-size:10px">高级参数（晋级/平局/胜 的阈值与仓位）可在"启用策略"勾选"世界杯淘汰赛"后，通过 API 单独配置，默认值已按策略规格设好。</small></div>
     <div id="settingsMsg" style="text-align:center;padding:8px;margin-bottom:10px;border-radius:6px;display:none"></div>
     <div style="display:flex;gap:8px;justify-content:space-between"><button class="btn btn-primary" onclick="testConnection()" id="btnTestConn">测试连接</button><div style="display:flex;gap:8px"><button class="btn btn-ghost" onclick="closeModal('settings')">取消</button><button class="btn btn-success" onclick="saveAllSettings()">保存设置</button></div></div>
 </div></div>
@@ -463,7 +468,7 @@ async function loadOpportunities() {
 function renderOpportunities(opps, scannedAt) {
   const c = document.getElementById('oppsList');
   if (!opps || !opps.length) { c.innerHTML = '<div style="text-align:center;padding:20px;color:#94a3b8">暂未发现套利机会</div>'; return; }
-  const stratNames = { complement: '互补套利', probability: '概率偏差', market_making: '做市', momentum: '动量', logical: '逻辑套利', weather: '天气套利', nobot: 'No-Bot', pre_settle: '4h结算' };
+  const stratNames = { complement: '互补套利', probability: '概率偏差', market_making: '做市', momentum: '动量', logical: '逻辑套利', weather: '天气套利', nobot: 'No-Bot', pre_settle: '4h结算', worldcup: '世界杯淘汰赛' };
   const stratColors = { complement: '#22c55e', probability: '#8b5cf6', market_making: '#5b6ef5', momentum: '#f59e0b', logical: '#ec4899' };
   const tsLabel = scannedAt ? new Date(scannedAt).toLocaleString('zh-CN', { hour12: false }) : '';
   c.innerHTML = opps.map(function(o) {
@@ -655,7 +660,7 @@ async function loadStrategyPnl() {
   const grid = document.getElementById('strategyPnlGrid');
   try {
     const d = await api('/trades/pnl-by-strategy');
-    const names = { complement: '互补套利', probability: '概率偏差', market_making: '做市', momentum: '动量', logical: '逻辑套利', weather: '天气套利', nobot: 'No-Bot', pre_settle: '4h结算', manual: '手动', unknown: '其他' };
+    const names = { complement: '互补套利', probability: '概率偏差', market_making: '做市', momentum: '动量', logical: '逻辑套利', weather: '天气套利', nobot: 'No-Bot', pre_settle: '4h结算', worldcup: '世界杯淘汰赛', manual: '手动', unknown: '其他' };
     const pnl = d.pnl || {};
     const entries = Object.entries(pnl);
     if (!entries.length) { grid.innerHTML = '<div style="color:#fbbf24;font-size:12px;grid-column:1/-1">暂无交易数据</div>'; return; }

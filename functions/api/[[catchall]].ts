@@ -1147,6 +1147,259 @@ async function strategyPreSettlement(env: Env, m: any, db: D1Database, tradeSize
 }
 
 // =============================================
+// STRATEGY 9: World Cup Knockout Max-ROI
+// Bet only on knockout-stage markets that show a real edge vs de-vigged
+// bookmaker odds. Maker-only (never crosses the ask). Three sub-strategies:
+//   A. Advancement (晋级盘):  52–72%, edge ≥ 3%,    stake $2–5
+//   B. Strong-vs-strong draw (平局): draw 24–29%, fav 90' win <50%,
+//      win-margin <22%, edge ≥ 3%,                stake $2–5
+//   C. 90' favorite win:      52–61%, draw <25%,
+//      win-margin >28%, edge ≥ 3.5%,              stake $2–4
+// Single primary position per match, max $5. No edge → No Bet.
+// =============================================
+
+// De-vig a 3-way (home / draw / away) market into true probabilities.
+// Removes the bookmaker overround so the three probs sum to 1.
+function devigThreeWay(homeOdds: number, drawOdds: number, awayOdds: number): { home: number; draw: number; away: number } | null {
+  if (!(homeOdds > 1) || !(drawOdds > 1) || !(awayOdds > 1)) return null;
+  const rH = 1 / homeOdds, rD = 1 / drawOdds, rA = 1 / awayOdds;
+  const overround = rH + rD + rA;
+  if (overround <= 0) return null;
+  return { home: rH / overround, draw: rD / overround, away: rA / overround };
+}
+
+// Normalize a team / country name for fuzzy matching against question text.
+function normalizeTeam(name: string): string {
+  return (name || '')
+    .toLowerCase()
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '') // strip accents
+    .replace(/\b(fc|national team|football|soccer)\b/g, '')
+    .replace(/[^a-z0-9 ]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+// Common country aliases so Polymarket phrasing matches bookmaker naming.
+const TEAM_ALIASES: Record<string, string[]> = {
+  'usa': ['united states', 'us', 'usmnt', 'america'],
+  'south korea': ['korea republic', 'korea'],
+  'iran': ['ir iran'],
+  'ivory coast': ["cote d'ivoire", 'cote divoire'],
+  'czechia': ['czech republic'],
+};
+function teamInText(team: string, text: string): boolean {
+  const t = normalizeTeam(team);
+  if (t && text.includes(t)) return true;
+  for (const [canon, aliases] of Object.entries(TEAM_ALIASES)) {
+    if (t === canon || aliases.includes(t)) {
+      if (text.includes(canon)) return true;
+      for (const a of aliases) if (text.includes(a)) return true;
+    }
+  }
+  return false;
+}
+
+// Fetch + cache de-vigged World Cup match probabilities from The Odds API.
+// Cached for 6h in bot_state (knockout odds move slowly >18h out, and the
+// free tier is request-limited). Returns [] when no key / no data.
+async function fetchWorldCupOdds(env: Env, db: D1Database): Promise<any[]> {
+  const now = Math.floor(Date.now() / 1000);
+  const cached = await getState(db, 'worldcup_odds');
+  if (cached) {
+    try { const p = JSON.parse(cached); if (now - p.ts < 21600 && Array.isArray(p.games)) return p.games; } catch {}
+  }
+  const apiKey = await getSetting(db, 'WORLDCUP_ODDS_API_KEY');
+  if (!apiKey) return [];
+  const sportKey = await getSetting(db, 'WORLDCUP_SPORT_KEY', 'soccer_fifa_world_cup');
+  const regions = await getSetting(db, 'WORLDCUP_ODDS_REGIONS', 'us,uk,eu');
+  try {
+    const url = `https://api.the-odds-api.com/v4/sports/${sportKey}/odds/?apiKey=${apiKey}&regions=${regions}&markets=h2h&oddsFormat=decimal`;
+    const res = await fetch(url);
+    if (!res.ok) {
+      await addAlert(db, 'warning', `世界杯赔率拉取失败 HTTP ${res.status}（检查 WORLDCUP_ODDS_API_KEY / sport key）`);
+      return [];
+    }
+    const data: any[] = await res.json();
+    const games: any[] = [];
+    for (const g of data) {
+      const home = g.home_team, away = g.away_team;
+      if (!home || !away) continue;
+      // Average de-vigged probs across all bookmakers for stability.
+      let sH = 0, sD = 0, sA = 0, n = 0;
+      for (const bk of g.bookmakers || []) {
+        const mkt = (bk.markets || []).find((x: any) => x.key === 'h2h');
+        if (!mkt) continue;
+        const oc = mkt.outcomes || [];
+        const oHome = oc.find((o: any) => o.name === home)?.price;
+        const oAway = oc.find((o: any) => o.name === away)?.price;
+        const oDraw = oc.find((o: any) => o.name === 'Draw' || o.name === 'Tie')?.price;
+        const dv = devigThreeWay(oHome, oDraw, oAway);
+        if (dv) { sH += dv.home; sD += dv.draw; sA += dv.away; n++; }
+      }
+      if (n === 0) continue;
+      const commence = g.commence_time ? Math.floor(new Date(g.commence_time).getTime() / 1000) : null;
+      games.push({ home, away, p_home: sH / n, p_draw: sD / n, p_away: sA / n, books: n, commence });
+    }
+    await setState(db, 'worldcup_odds', JSON.stringify({ ts: now, games }));
+    return games;
+  } catch (e: any) {
+    await addAlert(db, 'warning', `世界杯赔率异常: ${(e.message || String(e)).slice(0, 120)}`);
+    return [];
+  }
+}
+
+// Classify a Polymarket knockout market from its question text.
+// Returns the market type and which side (home/away) the YES token backs.
+function classifyWorldCupMarket(question: string, game: any): { type: 'advance' | 'draw' | 'win90'; side: 'home' | 'away' | null } | null {
+  const q = normalizeTeam(question);
+  const isHome = teamInText(game.home, q);
+  const isAway = teamInText(game.away, q);
+
+  // Draw / tie market (no single team backed)
+  if (/\b(draw|tie|drawn)\b/.test(q) && !/\b(win|beat|advance)\b/.test(q)) {
+    return { type: 'draw', side: null };
+  }
+  // Advancement market (includes extra time / penalties)
+  if (/\b(advance|advances|progress|qualify|reach|win the tie|go through)\b/.test(q)) {
+    if (isHome && !isAway) return { type: 'advance', side: 'home' };
+    if (isAway && !isHome) return { type: 'advance', side: 'away' };
+    if (isHome) return { type: 'advance', side: 'home' };
+    if (isAway) return { type: 'advance', side: 'away' };
+    return null;
+  }
+  // 90-minute / regulation result market
+  if (/\b(win|beat|defeat|wins|in 90|regulation|full time|90 minutes)\b/.test(q)) {
+    if (isHome && !isAway) return { type: 'win90', side: 'home' };
+    if (isAway && !isHome) return { type: 'win90', side: 'away' };
+  }
+  return null;
+}
+
+async function strategyWorldCup(env: Env, m: any, db: D1Database, tradeSize: number, balance: number, games: any[], cache?: any): Promise<any|null> {
+  if (!m.token_yes || !games.length) return null;
+  const q = (m.question || '').toLowerCase();
+  // Quick reject: must look soccer/knockout-ish
+  if (!/(world cup|wc|advance|vs\.?|beat|win|draw|round of|quarter|semi|final)/.test(q)) return null;
+
+  // Find the match these markets belong to
+  const qn = normalizeTeam(m.question || '');
+  const game = games.find(g => teamInText(g.home, qn) && teamInText(g.away, qn));
+  if (!game) return null;
+
+  // Only act 18–30h before kickoff
+  if (game.commence) {
+    const hoursToKick = (game.commence - Math.floor(Date.now() / 1000)) / 3600;
+    if (hoursToKick < 18 || hoursToKick > 30) return null;
+  }
+
+  const cls = classifyWorldCupMarket(m.question || '', game);
+  if (!cls) return null;
+
+  // Single primary position per match: skip if we already hold a WC bet on this market
+  const existing = await db.prepare(
+    "SELECT COUNT(*) as n FROM trades WHERE condition_id=? AND strategy='worldcup' AND status IN ('filled','submitted')"
+  ).bind(m.condition_id).first<{n:number}>();
+  if (existing && existing.n > 0) return null;
+
+  // External (de-vigged) probability for THIS market's YES outcome
+  const favWin90 = Math.max(game.p_home, game.p_away);       // favorite 90' win prob
+  const winMargin = Math.abs(game.p_home - game.p_away);     // strength gap
+  let extProb: number;
+  let label: string;
+  if (cls.type === 'advance') {
+    // Approx advancement = 90' win + half of draw (ET/pens ~50/50). Documented approximation.
+    const win90 = cls.side === 'home' ? game.p_home : game.p_away;
+    extProb = win90 + 0.5 * game.p_draw;
+    label = `晋级`;
+  } else if (cls.type === 'draw') {
+    extProb = game.p_draw;
+    label = `平局`;
+  } else {
+    extProb = cls.side === 'home' ? game.p_home : game.p_away;
+    label = `90'胜`;
+  }
+
+  // Polymarket ask for the YES token (the price we'd pay if we crossed)
+  const ask = cache?.askY ?? await getPrice(env, m.token_yes, 'BUY');
+  const bid = cache?.bidY ?? await getPrice(env, m.token_yes, 'SELL');
+  if (ask === null || ask < 0.02 || ask > 0.98) return null;
+
+  const edge = extProb - ask;  // positive = external thinks YES underpriced
+
+  // --- Sub-strategy gating ---
+  let stake = 0;
+  const W = await getWorldCupParams(db);
+  if (cls.type === 'advance') {
+    // A. Advancement: ask 52–72%, edge ≥ 3%
+    if (ask < W.adv_lo || ask > W.adv_hi) return null;
+    if (edge < W.adv_edge) return null;
+    stake = W.adv_stake_lo + (W.adv_stake_hi - W.adv_stake_lo) * Math.min(edge / 0.06, 1);
+  } else if (cls.type === 'draw') {
+    // B. Strong-vs-strong draw: draw ask 24–29%, fav 90' win <50%, margin <22%, edge ≥ 3%
+    if (ask < W.draw_lo || ask > W.draw_hi) return null;
+    if (favWin90 >= W.draw_fav_max) return null;
+    if (winMargin >= W.draw_margin_max) return null;
+    if (edge < W.draw_edge) return null;
+    stake = W.draw_stake_lo + (W.draw_stake_hi - W.draw_stake_lo) * Math.min(edge / 0.06, 1);
+  } else {
+    // C. 90' favorite win: ask 52–61%, draw <25%, margin >28%, edge ≥ 3.5%
+    if (ask < W.win_lo || ask > W.win_hi) return null;
+    if (game.p_draw >= W.win_draw_max) return null;
+    if (winMargin <= W.win_margin_min) return null;
+    if (edge < W.win_edge) return null;
+    stake = W.win_stake_lo + (W.win_stake_hi - W.win_stake_lo) * Math.min((edge - W.win_edge) / 0.04, 1);
+  }
+
+  // Cap stake to the per-match max and available balance
+  stake = Math.min(stake, W.max_stake, tradeSize, balance);
+  if (stake < W.adv_stake_lo - 0.001 && stake < 1.5) return null;
+  if (balance < stake) return null;
+
+  // MAKER price: rest below the ask. Use bid + 1 tick if it stays under ask,
+  // else ask - 1 tick. Never cross the spread.
+  const tick = 0.01;
+  let makerPrice: number;
+  if (bid !== null && bid + tick < ask) makerPrice = Math.round((bid + tick) * 100) / 100;
+  else makerPrice = Math.round((ask - tick) * 100) / 100;
+  if (makerPrice < 0.02) makerPrice = 0.02;
+  if (makerPrice >= ask) return null; // safety: must remain maker
+
+  const size = Math.min(stake / makerPrice, 200);
+  if (size < 1) return null;
+
+  // Maker fee is 0% on Polymarket. Profit estimate = edge captured on size.
+  const expectedProfit = size * edge;
+
+  return {
+    strategy: 'worldcup', action: `WC_${cls.type.toUpperCase()}${cls.side ? '_' + cls.side.toUpperCase() : ''}`,
+    spread: edge, profit: expectedProfit,
+    confidence: Math.min(edge / 0.06, 1), fee_rate: 0, maker: true,
+    advisory: `世界杯[${label}] ${game.home} vs ${game.away} | 外部${(extProb*100).toFixed(1)}% vs 市场ask${(ask*100).toFixed(1)}% | edge ${(edge*100).toFixed(1)}% | 挂maker@${(makerPrice*100).toFixed(0)}¢ $${stake.toFixed(2)} (${game.books}家赔率)`,
+    legs: [{ token: m.token_yes, side: 'BUY', price: makerPrice, size, maker: true }],
+  };
+}
+
+// World Cup strategy parameters (overridable via settings; defaults match spec).
+async function getWorldCupParams(db: D1Database) {
+  const num = async (k: string, d: number) => parseFloat(await getSetting(db, k, String(d))) || d;
+  return {
+    // A. advancement
+    adv_lo: await num('WC_ADV_LO', 0.52), adv_hi: await num('WC_ADV_HI', 0.72),
+    adv_edge: await num('WC_ADV_EDGE', 0.03), adv_stake_lo: await num('WC_ADV_STAKE_LO', 2), adv_stake_hi: await num('WC_ADV_STAKE_HI', 5),
+    // B. draw
+    draw_lo: await num('WC_DRAW_LO', 0.24), draw_hi: await num('WC_DRAW_HI', 0.29),
+    draw_fav_max: await num('WC_DRAW_FAV_MAX', 0.50), draw_margin_max: await num('WC_DRAW_MARGIN_MAX', 0.22),
+    draw_edge: await num('WC_DRAW_EDGE', 0.03), draw_stake_lo: await num('WC_DRAW_STAKE_LO', 2), draw_stake_hi: await num('WC_DRAW_STAKE_HI', 5),
+    // C. 90' favorite win
+    win_lo: await num('WC_WIN_LO', 0.52), win_hi: await num('WC_WIN_HI', 0.61),
+    win_draw_max: await num('WC_WIN_DRAW_MAX', 0.25), win_margin_min: await num('WC_WIN_MARGIN_MIN', 0.28),
+    win_edge: await num('WC_WIN_EDGE', 0.035), win_stake_lo: await num('WC_WIN_STAKE_LO', 2), win_stake_hi: await num('WC_WIN_STAKE_HI', 4),
+    // global
+    max_stake: await num('WC_MAX_STAKE', 5),
+  };
+}
+
+// =============================================
 // SCAN ENGINE: Run all enabled strategies
 // =============================================
 async function runScan(env: Env) {
@@ -1247,6 +1500,12 @@ async function runScanInner(env: Env) {
   const STRATEGY_PACING_MS = 500; // 0.5s between strategy types for one market
   const aiSkipSet = new Set<string>(); // Skip AI for markets with non-AI signals
 
+  // World Cup: fetch de-vigged bookmaker odds once per scan (cached 6h)
+  let wcGames: any[] = [];
+  if (enabled.includes('worldcup')) {
+    try { wcGames = await fetchWorldCupOdds(env, db); } catch {}
+  }
+
   for (const m of mkts) {
     const cache = priceCache[m.condition_id];
     try {
@@ -1267,6 +1526,10 @@ async function runScanInner(env: Env) {
       }
       if (enabled.includes('pre_settle')) {
         const o = await strategyPreSettlement(env, m, db, tradeSize, balance, cache);
+        if (o) { opps.push({ ...o, market: m.question, condition_id: m.condition_id }); aiSkipSet.add(m.condition_id); }
+      }
+      if (enabled.includes('worldcup') && wcGames.length) {
+        const o = await strategyWorldCup(env, m, db, tradeSize, balance, wcGames, cache);
         if (o) { opps.push({ ...o, market: m.question, condition_id: m.condition_id }); aiSkipSet.add(m.condition_id); }
       }
       // AI probability: skip if cheaper strategies already found a signal for this market
@@ -1386,7 +1649,7 @@ async function runScanInner(env: Env) {
   const traded = queued;
 
   // Always log scan summary so user knows system is alive
-  const stratNames: Record<string,string> = { complement: '互补套利', probability: '概率偏差', market_making: '做市', momentum: '动量', logical: '逻辑套利', weather: '天气套利', nobot: 'No-Bot', pre_settle: '4h结算' };
+  const stratNames: Record<string,string> = { complement: '互补套利', probability: '概率偏差', market_making: '做市', momentum: '动量', logical: '逻辑套利', weather: '天气套利', nobot: 'No-Bot', pre_settle: '4h结算', worldcup: '世界杯淘汰赛' };
   const tradeableSummary = tradableOpps.map(o => `[${stratNames[o.strategy] || o.strategy}] ${o.market?.slice(0,20)} $${o.profit.toFixed(3)}`).join('; ');
   const advisorySummary = opps.filter(o => !o.legs?.length).map(o => `[${stratNames[o.strategy] || o.strategy}] ${o.market?.slice(0,20)} ${o.advisory || ''}`).join('; ');
   // Show top 3 closest-to-threshold opportunities that got filtered
@@ -1916,7 +2179,14 @@ app.get('/prices/:cid', async c => c.json((await c.env.DB.prepare('SELECT * FROM
 // Settings
 app.get('/settings', async c => {
   const db = c.env.DB; const rows = await db.prepare('SELECT key,value FROM settings').all(); const s: Record<string, any> = {};
-  for (const r of rows.results as any[]) s[r.key] = { value: r.value, is_set: !!r.value };
+  const dbSecretKeys = new Set(['WORLDCUP_ODDS_API_KEY']);
+  for (const r of rows.results as any[]) {
+    if (dbSecretKeys.has(r.key) && r.value) {
+      s[r.key] = { value: r.value.length > 8 ? r.value.slice(0, 4) + '****' + r.value.slice(-4) : '****', is_set: true };
+    } else {
+      s[r.key] = { value: r.value, is_set: !!r.value };
+    }
+  }
   for (const k of ['POLYMARKET_API_KEY','POLYMARKET_API_SECRET','POLYMARKET_API_PASSPHRASE','POLYMARKET_PRIVATE_KEY','POLYMARKET_FUNDER_ADDRESS']) { const v = (c.env as any)[k] || ''; s[k] = { value: v ? v.slice(0, 4) + '****' + v.slice(-4) : '', is_set: !!v }; }
   s['POLYMARKET_API_URL'] = { value: c.env.POLYMARKET_API_URL || 'https://clob.polymarket.com', is_set: true };
   s['GAMMA_API_URL'] = { value: c.env.GAMMA_API_URL || 'https://gamma-api.polymarket.com', is_set: true };
@@ -1925,7 +2195,11 @@ app.get('/settings', async c => {
 });
 app.put('/settings', async c => {
   const { settings } = await c.req.json<{ settings: Record<string, string> }>(); const db = c.env.DB;
-  const dbKeys = ['MAX_POSITION_SIZE_USD','DAILY_LOSS_LIMIT_USD','MAX_SINGLE_TRADE_USD','MIN_ARBITRAGE_SPREAD','POLL_INTERVAL','AI_PROVIDER','AI_API_KEY','AI_MODEL','AI_MODEL_FAST','AI_BASE_URL','TRADING_MODE','ENABLED_STRATEGIES','TRADE_COOLDOWN_SEC','AI_PROVIDERS_JSON','AI_ACTIVE_PROVIDER','STARTING_CASH'];
+  const dbKeys = ['MAX_POSITION_SIZE_USD','DAILY_LOSS_LIMIT_USD','MAX_SINGLE_TRADE_USD','MIN_ARBITRAGE_SPREAD','POLL_INTERVAL','AI_PROVIDER','AI_API_KEY','AI_MODEL','AI_MODEL_FAST','AI_BASE_URL','TRADING_MODE','ENABLED_STRATEGIES','TRADE_COOLDOWN_SEC','AI_PROVIDERS_JSON','AI_ACTIVE_PROVIDER','STARTING_CASH',
+    'WORLDCUP_ODDS_API_KEY','WORLDCUP_SPORT_KEY','WORLDCUP_ODDS_REGIONS',
+    'WC_ADV_LO','WC_ADV_HI','WC_ADV_EDGE','WC_ADV_STAKE_LO','WC_ADV_STAKE_HI',
+    'WC_DRAW_LO','WC_DRAW_HI','WC_DRAW_FAV_MAX','WC_DRAW_MARGIN_MAX','WC_DRAW_EDGE','WC_DRAW_STAKE_LO','WC_DRAW_STAKE_HI',
+    'WC_WIN_LO','WC_WIN_HI','WC_WIN_DRAW_MAX','WC_WIN_MARGIN_MIN','WC_WIN_EDGE','WC_WIN_STAKE_LO','WC_WIN_STAKE_HI','WC_MAX_STAKE'];
   for (const [k, v] of Object.entries(settings)) { if (dbKeys.includes(k) && v && !v.includes('****')) await db.prepare('INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)').bind(k, v).run(); }
   return c.json({ status: 'saved' }); });
 
