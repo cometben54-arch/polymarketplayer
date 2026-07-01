@@ -1478,29 +1478,31 @@ async function runScanInner(env: Env) {
   // and a longer delay between markets. This keeps avg request rate low.
   const priceCache: Record<string, { mid: number | null; askY: number | null; bidY: number | null; askN: number | null; bidN: number | null; bookY: any }> = {};
 
-  // Configurable pacing (in milliseconds) - spreads requests across time to avoid bursts
-  const FETCH_PACING_MS = 2000;  // 2s delay between yes/no orderbook calls in same market
-  const MARKET_PACING_MS = 4000; // 4s delay between markets
+  // Configurable pacing (ms). Keeps avg request rate low without blowing past the
+  // ~2min cron interval. YES/NO orderbooks are fetched in parallel per market, and
+  // markets are paced apart. Tunable via settings (SCAN_MARKET_PACING_MS).
+  // Defaults: 20 markets × ~1.5s ≈ 30-40s total (was ~132s, which overran the cron).
+  const MARKET_PACING_MS = parseInt(await getSetting(db, 'SCAN_MARKET_PACING_MS', '1500')) || 1500;
 
   for (let i = 0; i < mkts.length; i++) {
     const m = mkts[i];
     if (!m.token_yes) continue;
     const cache: any = { mid: null, askY: null, bidY: null, askN: null, bidN: null, bookY: null };
     try {
-      const bookY = await getOrderbook(env, m.token_yes);
+      // Fetch YES and NO orderbooks concurrently (2 subrequests, no inter-leg sleep)
+      const [bookY, bookN] = await Promise.all([
+        getOrderbook(env, m.token_yes),
+        m.token_no ? getOrderbook(env, m.token_no) : Promise.resolve(null),
+      ]);
       if (bookY?.bids?.length && bookY?.asks?.length) {
         cache.bookY = bookY;
         cache.bidY = parseFloat(bookY.bids[0].price);
         cache.askY = parseFloat(bookY.asks[0].price);
         cache.mid = (cache.bidY + cache.askY) / 2;
       }
-      if (m.token_no) {
-        await sleep(FETCH_PACING_MS);
-        const bookN = await getOrderbook(env, m.token_no);
-        if (bookN?.bids?.length && bookN?.asks?.length) {
-          cache.bidN = parseFloat(bookN.bids[0].price);
-          cache.askN = parseFloat(bookN.asks[0].price);
-        }
+      if (bookN?.bids?.length && bookN?.asks?.length) {
+        cache.bidN = parseFloat(bookN.bids[0].price);
+        cache.askN = parseFloat(bookN.asks[0].price);
       }
     } catch (e: any) {
       console.error('Price fetch failed for', m.condition_id, e.message);
@@ -1518,10 +1520,11 @@ async function runScanInner(env: Env) {
   }
 
   // ============= RUN STRATEGIES SEQUENTIALLY WITH PACING =============
-  // Strategies use cached prices (no API calls), so fast.
-  // Small delays between strategies to spread DB writes evenly.
+  // Strategies mostly use cached prices (no API calls), so a large delay here is
+  // wasteful. Keep a small pace to smooth DB writes / external calls (weather,
+  // gamma, AI already have their own caches). Tunable via SCAN_STRATEGY_PACING_MS.
   const opps: any[] = [];
-  const STRATEGY_PACING_MS = 500; // 0.5s between strategy types for one market
+  const STRATEGY_PACING_MS = parseInt(await getSetting(db, 'SCAN_STRATEGY_PACING_MS', '100')) || 0; // 0.1s default (was 0.5s)
   const aiSkipSet = new Set<string>(); // Skip AI for markets with non-AI signals
 
   // World Cup: fetch de-vigged bookmaker odds once per scan (cached 6h)
@@ -2220,6 +2223,7 @@ app.get('/settings', async c => {
 app.put('/settings', async c => {
   const { settings } = await c.req.json<{ settings: Record<string, string> }>(); const db = c.env.DB;
   const dbKeys = ['MAX_POSITION_SIZE_USD','DAILY_LOSS_LIMIT_USD','MAX_SINGLE_TRADE_USD','MIN_ARBITRAGE_SPREAD','POLL_INTERVAL','AI_PROVIDER','AI_API_KEY','AI_MODEL','AI_MODEL_FAST','AI_BASE_URL','TRADING_MODE','ENABLED_STRATEGIES','TRADE_COOLDOWN_SEC','AI_PROVIDERS_JSON','AI_ACTIVE_PROVIDER','STARTING_CASH',
+    'SCAN_MARKET_PACING_MS','SCAN_STRATEGY_PACING_MS',
     'WORLDCUP_ODDS_API_KEY','WORLDCUP_SPORT_KEY','WORLDCUP_ODDS_REGIONS',
     'WC_ADV_LO','WC_ADV_HI','WC_ADV_EDGE','WC_ADV_STAKE_LO','WC_ADV_STAKE_HI',
     'WC_DRAW_LO','WC_DRAW_HI','WC_DRAW_FAV_MAX','WC_DRAW_MARGIN_MAX','WC_DRAW_EDGE','WC_DRAW_STAKE_LO','WC_DRAW_STAKE_HI',

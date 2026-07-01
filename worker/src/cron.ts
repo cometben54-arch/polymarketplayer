@@ -28,10 +28,20 @@ export default {
     if (cronPattern === '*/2 * * * *') {
       ctx.waitUntil((async () => {
         try {
-          // Step 1: Scan for opportunities (queues best one to DB)
-          const scanRes = await fetch(`${baseUrl}/api/scan`, { method: 'POST', headers });
-          const scanData = await scanRes.json();
-          console.log('Scan result:', JSON.stringify(scanData).slice(0, 300));
+          // Step 1: Scan for opportunities (queues best one to DB).
+          // Guard with a 90s timeout so a pathologically slow scan can't hang the
+          // scheduled Worker. A healthy scan now completes in ~40s.
+          const scanCtl = new AbortController();
+          const scanTimer = setTimeout(() => scanCtl.abort(), 90000);
+          try {
+            const scanRes = await fetch(`${baseUrl}/api/scan`, { method: 'POST', headers, signal: scanCtl.signal });
+            const scanData = await scanRes.json();
+            console.log('Scan result:', JSON.stringify(scanData).slice(0, 300));
+          } catch (e: any) {
+            console.error('Scan step failed/timed out:', e.message);
+          } finally {
+            clearTimeout(scanTimer);
+          }
 
           // Step 2: Execute any pending trade (fresh subrequest budget)
           // Wait 2s before triggering to let the queue be written
