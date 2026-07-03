@@ -14,6 +14,16 @@ interface Env {
   POLYMARKET_API_URL?: string; GAMMA_API_URL?: string; DATA_API_URL?: string;
   POLYMARKET_API_KEY?: string; POLYMARKET_API_SECRET?: string; POLYMARKET_API_PASSPHRASE?: string;
   POLYMARKET_PRIVATE_KEY?: string; POLYMARKET_FUNDER_ADDRESS?: string; ADMIN_PASSWORD?: string;
+  CRON_SECRET?: string;
+}
+
+// Verify the X-Cron-Secret header on trigger endpoints.
+// Backward compatible: if CRON_SECRET is not configured, allow (current behavior).
+// If configured, callers (CF cron worker / local bridge / external cron) must send it.
+function cronAuthorized(c: any): boolean {
+  const secret = c.env.CRON_SECRET;
+  if (!secret) return true; // not configured → open (unchanged)
+  return c.req.header('X-Cron-Secret') === secret;
 }
 
 const CLOB = (e: Env) => (e.POLYMARKET_API_URL || 'https://clob.polymarket.com').replace(/\/$/, '');
@@ -2433,10 +2443,14 @@ app.post('/markets/cleanup', async c => {
 });
 
 // Scan & AI
-app.post('/scan', async c => c.json(await runScan(c.env)));
+app.post('/scan', async c => {
+  if (!cronAuthorized(c)) return c.json({ error: 'unauthorized' }, 401);
+  return c.json(await runScan(c.env));
+});
 
 // Execute the pending trade from the queue (separate Worker invocation = fresh subrequest budget)
 app.post('/trade/execute-pending', async c => {
+  if (!cronAuthorized(c)) return c.json({ error: 'unauthorized' }, 401);
   const db = c.env.DB;
   const pendingStr = await getState(db, 'pending_trade');
   if (!pendingStr) return c.json({ status: 'no_pending' });
