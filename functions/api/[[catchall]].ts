@@ -65,23 +65,29 @@ async function getOrderbook(env: Env, tid: string): Promise<any> { return clobGe
 function sleep(ms: number): Promise<void> { return new Promise(r => setTimeout(r, ms)); }
 
 // --- Account / Position helpers ---
-// Query balance via multiple methods
+// Portfolio market value (含未平仓持仓 mark-to-market). 仅用于面板展示，
+// 不能当作买力/下单资金——持仓里的钱不能直接再下单。
+// Polymarket Data API /value 返回数组: [{"user":"0x..","value":370.9}]
+async function getPortfolioValue(env: Env): Promise<number> {
+  const addr = env.POLYMARKET_FUNDER_ADDRESS;
+  if (!addr) return 0;
+  try {
+    const dataUrl = (env.DATA_API_URL || 'https://data-api.polymarket.com').replace(/\/$/, '');
+    const res = await fetch(`${dataUrl}/value?user=${addr}`);
+    if (res.ok) {
+      const d: any = await res.json();
+      const row = Array.isArray(d) ? d[0] : d; // /value 返回数组，取首项
+      const val = parseFloat(row?.value ?? row?.portfolio_value ?? '0');
+      return isNaN(val) ? 0 : val;
+    }
+  } catch {}
+  return 0;
+}
+
+// 可下单买力 = 链上「自由 USDC」余额（不含锁在持仓里的钱）。用于给新单算仓位。
 async function getAccountBalance(env: Env): Promise<number> {
   const addr = env.POLYMARKET_FUNDER_ADDRESS;
   const signerAddr = env.POLYMARKET_PRIVATE_KEY ? getSignerAddress(env) : '';
-
-  // Method 1: Try Polymarket Data API for portfolio value
-  if (addr) {
-    try {
-      const dataUrl = (env.DATA_API_URL || 'https://data-api.polymarket.com').replace(/\/$/, '');
-      const res = await fetch(`${dataUrl}/value?user=${addr}`);
-      if (res.ok) {
-        const d: any = await res.json();
-        const val = parseFloat(d.value || d.portfolio_value || '0');
-        if (val > 0) return val;
-      }
-    } catch {}
-  }
 
   // Method 2: Query USDC.e on both funder and signer addresses
   const USDC_ADDR = '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174';
@@ -1476,14 +1482,19 @@ async function runScanInner(env: Env) {
   const mode = await getSetting(db, 'TRADING_MODE', 'paper');
   const cooldown = parseInt(await getSetting(db, 'TRADE_COOLDOWN_SEC', '30'));
 
-  // Get balance: paper=simulated, real=try API then fallback to STARTING_CASH
+  // Buying power (可下单资金): paper=simulated, real=链上自由 USDC。
+  // 真实模式不再用 startingCash 兜底——读到多少自由 USDC 就是多少买力；
+  // 读不到(RPC 全挂)或确实为 0 → balance=0 → 风控自动不下单，这是真实模式更安全的失败方式，
+  // 避免用「组合市值/持仓里的钱」虚增买力去下没有现金支撑的单。
   const startingCash = parseFloat(await getSetting(db, 'STARTING_CASH', '100'));
-  let balance: number;
+  let balance: number;         // 可下单买力（自由 USDC）
+  let portfolioValue = 0;      // 组合市值（含持仓，仅展示）
   if (mode === 'paper') {
     balance = await getPaperBalance(db, startingCash);
+    portfolioValue = balance;
   } else {
     balance = await getAccountBalance(env);
-    if (balance <= 0) balance = startingCash; // Fallback when RPC/API fails
+    portfolioValue = await getPortfolioValue(env);
   }
 
   // ============= PACED PRICE FETCH =============
@@ -1702,13 +1713,13 @@ async function runScanInner(env: Env) {
     .join('; ');
   const threshold = Math.max(minSpread * tradeSize, 0.005);
   await addAlert(db, 'info',
-    `扫描${mkts.length}/${allMkts.length}市场 | 余额$${balance.toFixed(2)} | 持仓$${currentPosition.toFixed(0)}/$${maxPosition} | 阈值$${threshold.toFixed(3)} | 模式:${mode}`
+    `扫描${mkts.length}/${allMkts.length}市场 | 买力$${balance.toFixed(2)}${mode === 'real' ? `(市值$${portfolioValue.toFixed(0)})` : ''} | 持仓$${currentPosition.toFixed(0)}/$${maxPosition} | 阈值$${threshold.toFixed(3)} | 模式:${mode}`
     + (tradableOpps.length ? ` | ✅可交易${tradableOpps.length}个: ${tradeableSummary}` : ` | 无可交易机会(检测${opps.length}个)`)
     + (traded ? ` | 已${mode === 'paper' ? '模拟' : '真实'}交易[${stratNames[traded.strategy] || traded.strategy}]` : '')
     + (closeMisses && !tradableOpps.length ? ` | 💡接近: ${closeMisses}` : '')
     + (advisorySummary ? ` | 参考: ${advisorySummary}` : ''));
 
-  const result = { scanned: mkts.length, mode, balance: Math.round(balance * 100) / 100, strategies: enabled,
+  const result = { scanned: mkts.length, mode, balance: Math.round(balance * 100) / 100, portfolio_value: Math.round(portfolioValue * 100) / 100, strategies: enabled,
     opportunities: opps.map(o => ({ strategy: o.strategy, market: o.market, action: o.action,
       spread: Math.round(o.spread * 10000) / 10000, profit: Math.round(o.profit * 100) / 100,
       confidence: Math.round(o.confidence * 100) / 100, legs: o.legs?.length || 0,
@@ -1987,10 +1998,11 @@ app.get('/bot/status', async c => {
   const mode = await getSetting(db, 'TRADING_MODE', 'paper');
   const startingCash = parseFloat(await getSetting(db, 'STARTING_CASH', '100'));
   const balance = mode === 'paper' ? await getPaperBalance(db, startingCash) : await getAccountBalance(c.env);
+  const portfolioValue = mode === 'paper' ? balance : await getPortfolioValue(c.env);
   return c.json({ running: (await getState(db, 'running')) === 'true', paused: (await getState(db, 'paused')) === 'true',
     daily_pnl: parseFloat(await getState(db, 'daily_pnl') || '0'), total_pnl: parseFloat(await getState(db, 'total_pnl') || '0'),
     trading_ready: !!(c.env.POLYMARKET_API_KEY && c.env.POLYMARKET_PRIVATE_KEY),
-    mode, starting_cash: startingCash, balance,
+    mode, starting_cash: startingCash, balance, portfolio_value: portfolioValue,
     strategies: (await getSetting(db, 'ENABLED_STRATEGIES', 'complement,probability,market_making,momentum,logical,weather,nobot,pre_settle')).split(',') });
 });
 app.post('/bot/control', async c => {
@@ -2556,11 +2568,13 @@ ${currentFees}
 });
 app.get('/debug/balance', async c => {
   const balance = await getAccountBalance(c.env);
+  const portfolioValue = await getPortfolioValue(c.env);
   const startingCash = parseFloat(await getSetting(c.env.DB, 'STARTING_CASH', '100'));
   const paperBalance = await getPaperBalance(c.env.DB, startingCash);
   return c.json({
     funder_address: c.env.POLYMARKET_FUNDER_ADDRESS,
-    real_usdc_balance: balance,
+    real_usdc_balance: balance,          // 自由 USDC = 可下单买力
+    portfolio_value: portfolioValue,     // 组合市值(含持仓, 仅展示)
     paper_balance: paperBalance,
     starting_cash: startingCash,
   });
