@@ -1455,11 +1455,12 @@ async function runScanInner(env: Env) {
   const allMkts = (await db.prepare('SELECT * FROM watched_markets WHERE active=1').all()).results as any[];
   if (!allMkts.length) return { skipped: true, reason: 'no markets' };
 
-  // Markets per scan. Default 12 keeps a single scan under ~30s so external cron
+  // Markets per scan. Default 10 keeps a single scan under ~30s so external cron
   // services (cron-job.org, ~30s timeout) show green instead of a false timeout.
+  // (Measured: 12/round ≈ 30.6s over the line; 10/round ≈ 29.5s safe.)
   // The scan rotates via scan_offset so all markets are still covered over cycles.
   // Tunable via SCAN_MAX_MARKETS. Hard cap 24 to stay well under CF's 50-subrequest limit.
-  const MAX_PER_SCAN = Math.min(parseInt(await getSetting(db, 'SCAN_MAX_MARKETS', '12')) || 12, 24);
+  const MAX_PER_SCAN = Math.min(parseInt(await getSetting(db, 'SCAN_MAX_MARKETS', '10')) || 10, 24);
   let mkts = allMkts;
   if (allMkts.length > MAX_PER_SCAN) {
     let off = parseInt(await getState(db, 'scan_offset') || '0');
