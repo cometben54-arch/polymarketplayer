@@ -1455,8 +1455,11 @@ async function runScanInner(env: Env) {
   const allMkts = (await db.prepare('SELECT * FROM watched_markets WHERE active=1').all()).results as any[];
   if (!allMkts.length) return { skipped: true, reason: 'no markets' };
 
-  // Cap at 20 markets per scan (20×2 orderbook = 40 subrequests, under 50 limit)
-  const MAX_PER_SCAN = 20;
+  // Markets per scan. Default 12 keeps a single scan under ~30s so external cron
+  // services (cron-job.org, ~30s timeout) show green instead of a false timeout.
+  // The scan rotates via scan_offset so all markets are still covered over cycles.
+  // Tunable via SCAN_MAX_MARKETS. Hard cap 24 to stay well under CF's 50-subrequest limit.
+  const MAX_PER_SCAN = Math.min(parseInt(await getSetting(db, 'SCAN_MAX_MARKETS', '12')) || 12, 24);
   let mkts = allMkts;
   if (allMkts.length > MAX_PER_SCAN) {
     let off = parseInt(await getState(db, 'scan_offset') || '0');
@@ -2233,7 +2236,7 @@ app.get('/settings', async c => {
 app.put('/settings', async c => {
   const { settings } = await c.req.json<{ settings: Record<string, string> }>(); const db = c.env.DB;
   const dbKeys = ['MAX_POSITION_SIZE_USD','DAILY_LOSS_LIMIT_USD','MAX_SINGLE_TRADE_USD','MIN_ARBITRAGE_SPREAD','POLL_INTERVAL','AI_PROVIDER','AI_API_KEY','AI_MODEL','AI_MODEL_FAST','AI_BASE_URL','TRADING_MODE','ENABLED_STRATEGIES','TRADE_COOLDOWN_SEC','AI_PROVIDERS_JSON','AI_ACTIVE_PROVIDER','STARTING_CASH',
-    'SCAN_MARKET_PACING_MS','SCAN_STRATEGY_PACING_MS',
+    'SCAN_MARKET_PACING_MS','SCAN_STRATEGY_PACING_MS','SCAN_MAX_MARKETS',
     'WORLDCUP_ODDS_API_KEY','WORLDCUP_SPORT_KEY','WORLDCUP_ODDS_REGIONS',
     'WC_ADV_LO','WC_ADV_HI','WC_ADV_EDGE','WC_ADV_STAKE_LO','WC_ADV_STAKE_HI',
     'WC_DRAW_LO','WC_DRAW_HI','WC_DRAW_FAV_MAX','WC_DRAW_MARGIN_MAX','WC_DRAW_EDGE','WC_DRAW_STAKE_LO','WC_DRAW_STAKE_HI',
